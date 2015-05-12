@@ -760,6 +760,16 @@ if test "x$with_xen_opt" = "xyes" -a "x$mono_cv_clang" = "xno"; then
 	])
 fi
 
+AC_ARG_WITH(null_check, [  --with-null_check=yes,no       Enable null check (defaults to yes)],[],[with_null_check=yes])
+if test "x$with_null_check" = "xno"; then
+    CFLAGS="$CFLAGS -DNO_NULL_CHECK"
+fi
+
+AC_ARG_WITH(bounds_check, [  --with-bounds_check=yes,no       Enable bounds check (defaults to yes)],[],[with_bounds_check=yes])
+if test "x$with_bounds_check" = "xno"; then
+    CFLAGS="$CFLAGS -DNO_BOUNDS_CHECK"
+fi
+
 AC_ARG_ENABLE(small-config, [  --enable-small-config Enable tweaks to reduce requirements (and capabilities)], enable_small_config=$enableval, enable_small_config=no)
 
 if test x$enable_small_config = xyes; then

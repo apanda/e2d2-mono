@@ -848,14 +848,18 @@ static int ccount = 0;
     } while (0)
 
 /* Emit an explicit null check which doesn't depend on SIGSEGV signal handling */
+#ifdef NO_NULL_CHECK
+#define MONO_EMIT_NULL_CHECK(cfg, reg) do { } while (0)
+#else
 #define MONO_EMIT_NULL_CHECK(cfg, reg) do { \
-		if (cfg->explicit_null_checks) {							  \
+		if (cfg->explicit_null_checks) { \
 			MONO_EMIT_NEW_BIALU_IMM (cfg, OP_COMPARE_IMM, -1, (reg), 0); \
 			MONO_EMIT_NEW_COND_EXC (cfg, EQ, "NullReferenceException"); \
 		} else {			\
-			MONO_EMIT_NEW_IMPLICIT_EXCEPTION_LOAD_STORE (cfg);						\
+			MONO_EMIT_NEW_IMPLICIT_EXCEPTION_LOAD_STORE (cfg);		\
 		}																\
 	} while (0)
+#endif
 
 #define MONO_EMIT_NEW_CHECK_THIS(cfg, sreg) do { \
 		cfg->flags |= MONO_CFG_HAS_CHECK_THIS;	 \
@@ -931,8 +935,11 @@ static int ccount = 0;
  * array_length_field is the field in the previous struct with the length
  * index_reg is the vreg holding the index
  */
+#ifdef NO_BOUNDS_CHECK
+#define MONO_EMIT_BOUNDS_CHECK(cfg, array_reg, array_type, array_length_field, index_reg) do { } while (0)
+#else
 #define MONO_EMIT_BOUNDS_CHECK(cfg, array_reg, array_type, array_length_field, index_reg) do { \
-		if (!(cfg->opt & MONO_OPT_UNSAFE)) {							\
+		if (!(cfg->opt & MONO_OPT_UNSAFE)) {					    \
 		if (!(cfg->opt & MONO_OPT_ABCREM)) {							\
 			MONO_EMIT_NULL_CHECK (cfg, array_reg);						\
 			if (COMPILE_LLVM (cfg)) \
@@ -952,7 +959,7 @@ static int ccount = 0;
 		}																\
 		}																\
     } while (0)
-
+#endif
 G_END_DECLS
 
 #endif
