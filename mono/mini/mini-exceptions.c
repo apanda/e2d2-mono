@@ -1345,6 +1345,7 @@ mono_handle_exception_internal_first_pass (MonoContext *ctx, gpointer obj, gint3
 	GList *trace_ips = NULL;
 	MonoException *mono_ex;
 	gboolean stack_overflow = FALSE;
+	gboolean abort_exception = FALSE;
 	MonoContext initial_ctx;
 	MonoMethod *method;
 	int frame_count = 0;
@@ -1357,6 +1358,11 @@ mono_handle_exception_internal_first_pass (MonoContext *ctx, gpointer obj, gint3
 
 	if (obj == domain->stack_overflow_ex)
 		stack_overflow = TRUE;
+
+	ex_obj = (MonoObject*) obj;
+	if (ex_obj->vtable && ex_obj->vtable->klass == mono_defaults.threadabortexception_class)
+	    abort_exception = TRUE;
+	ex_obj = NULL;
 
 	mono_ex = (MonoException*)obj;
 	initial_trace_ips = mono_ex->trace_ips;
@@ -1427,8 +1433,12 @@ mono_handle_exception_internal_first_pass (MonoContext *ctx, gpointer obj, gint3
 			 */
 			if (!initial_trace_ips && (frame_count < 1000)) {
 				trace_ips = g_list_prepend (trace_ips, MONO_CONTEXT_GET_IP (ctx));
-				trace_ips = g_list_prepend (trace_ips,
+				if (!abort_exception) {
+				    // FIXME: This seems to access things poorly when a thread is aborted in llvm: signalling
+				    // means that we are not sure where on the stack the this pointer is, causing a crash
+				    trace_ips = g_list_prepend (trace_ips,
 											get_generic_info_from_stack_frame (ji, ctx));
+                }
 			}
 		}
 
