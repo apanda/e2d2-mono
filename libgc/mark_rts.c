@@ -380,7 +380,8 @@ ptr_t GC_approx_sp()
 #     pragma GCC diagnostic push
 #     pragma GCC diagnostic ignored "-Wreturn-local-addr"
 #   endif
-    return((ptr_t)(&dummy));
+    return __builtin_frame_address(0);
+    /*return((ptr_t)(&dummy));*/
 #   if defined(__GNUC__) && (__GNUC__ * 100 + __GNUC_MINOR__ >= 408)
 #      pragma GCC diagnostic pop
 #   endif
