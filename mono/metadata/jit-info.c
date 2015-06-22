@@ -14,6 +14,10 @@
 #include <glib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/types.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <unistd.h>
 
 #include <mono/metadata/gc-internal.h>
 
@@ -91,7 +95,6 @@ MonoJitInfoTable *
 mono_jit_info_table_new (MonoDomain *domain)
 {
 	MonoJitInfoTable *table = g_malloc0 (MONO_SIZEOF_JIT_INFO_TABLE + sizeof (MonoJitInfoTableChunk*));
-
 	table->domain = domain;
 	table->num_chunks = 1;
 	table->chunks [0] = jit_info_table_new_chunk ();
@@ -509,7 +512,7 @@ jit_info_table_copy_and_purify_chunk (MonoJitInfoTable *table, MonoJitInfoTableC
 			++j;
 		}
 	}
-
+	
 	g_assert (j == new_table->num_chunks);
 
 	return new_table;
@@ -639,6 +642,9 @@ jit_info_table_add (MonoDomain *domain, MonoJitInfoTable *volatile *table_ptr, M
 void
 mono_jit_info_table_add (MonoDomain *domain, MonoJitInfo *ji)
 {
+#ifdef LINUX_PERF
+	char *method;
+#endif
 	g_assert (ji->d.method != NULL);
 
 	mono_domain_lock (domain);
@@ -646,6 +652,15 @@ mono_jit_info_table_add (MonoDomain *domain, MonoJitInfo *ji)
 	++mono_stats.jit_info_table_insert_count;
 
 	jit_info_table_add (domain, &domain->jit_info_table, ji);
+
+#ifdef LINUX_PERF
+	method = mono_method_full_name (mono_jit_info_get_method(ji), TRUE);
+	if (method != NULL) {
+        fprintf(domain->fd, "%lx %x %s\n",
+                (uint64_t)ji->code_start, ji->code_size, method);
+        fflush(domain->fd);
+    } 
+#endif
 
 	mono_domain_unlock (domain);
 }
