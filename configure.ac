@@ -770,6 +770,12 @@ if test "x$with_bounds_check" = "xno"; then
     CFLAGS="$CFLAGS -DNO_BOUNDS_CHECK"
 fi
 
+AC_ARG_WITH(linux_perf, [  --with-linux_perf=yes,no Enable perf tools (defaults to no)],[],[with_linux_perf=no])
+if test "x$with_linux_perf" = "xyes"; then
+    CFLAGS="$CFLAGS -DLINUX_PERF"
+    CPPFLAGS="$CPPFLAGS -DLINUX_PERF"
+fi
+
 AC_ARG_ENABLE(small-config, [  --enable-small-config Enable tweaks to reduce requirements (and capabilities)], enable_small_config=$enableval, enable_small_config=no)
 
 if test x$enable_small_config = xyes; then
@@ -4068,6 +4074,7 @@ echo "
 	JNI support:   $jdk_headers_found
 	libgdiplus:    $libgdiplus_msg
 	zlib:          $zlib_msg
+	linux_perf:    $with_linux_perf
 	$disabled
 "
 if test x$with_static_mono = xno -a "x$host_win32" != "xyes"; then

@@ -418,6 +418,10 @@ struct _MonoDomain {
 	GHashTable *ftnptrs_hash;
 
 	guint32 execution_context_field_offset;
+
+#ifdef LINUX_PERF
+    FILE* fd;
+#endif
 };
 
 typedef struct  {

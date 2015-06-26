@@ -14,6 +14,11 @@
 #include <glib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <unistd.h>
 
 #include <mono/metadata/gc-internal.h>
 
@@ -446,6 +451,14 @@ mono_domain_create (void)
 	mono_mutex_init_recursive (&domain->finalizable_objects_hash_lock);
 
 	domain->method_rgctx_hash = NULL;
+
+#ifdef LINUX_PERF
+    char perf_file[128];
+    snprintf(perf_file, sizeof(perf_file), "/tmp/perf-%d.map", getpid());
+    domain->fd = NULL;
+    domain->fd = fopen(perf_file, "w");
+#endif
+
 
 	mono_appdomains_lock ();
 	domain_id_alloc (domain);
@@ -1081,6 +1094,9 @@ mono_domain_free (MonoDomain *domain, gboolean force)
 	int code_size, code_alloc;
 	GSList *tmp;
 	gpointer *p;
+#ifdef LINUX_PERF
+    char perf_file[128];
+#endif
 
 	if ((domain == mono_root_domain) && !force) {
 		g_warning ("cant unload root domain");
@@ -1228,6 +1244,12 @@ mono_domain_free (MonoDomain *domain, gboolean force)
 	g_assert (domain->num_jit_info_tables == 1);
 	mono_jit_info_table_free (domain->jit_info_table);
 	domain->jit_info_table = NULL;
+#ifdef LINUX_PERF
+    snprintf(perf_file, sizeof(perf_file), "/tmp/perf-%d.map", getpid());
+    fclose(domain->fd);
+    /* @apanda: Should unlink, but at the same time this screws up perf in some way */
+    unlink(perf_file);
+#endif
 	g_assert (!domain->jit_info_free_queue);
 
 	/* collect statistics */
