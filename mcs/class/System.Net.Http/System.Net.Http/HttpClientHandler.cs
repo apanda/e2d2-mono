@@ -274,9 +274,7 @@ namespace System.Net.Http
 			// Add request headers
 			var headers = wr.Headers;
 			foreach (var header in request.Headers) {
-				foreach (var value in header.Value) {
-					headers.AddValue (header.Key, value);
-				}
+				headers.AddValue (header.Key, HttpRequestHeaders.GetSingleHeaderString (header.Key, header.Value));
 			}
 			
 			return wr;
@@ -339,6 +337,8 @@ namespace System.Net.Http
 							await content.LoadIntoBufferAsync (MaxRequestContentBufferSize).ConfigureAwait (false);
 							wrequest.ContentLength = content.Headers.ContentLength.Value;
 						}
+
+						wrequest.ResendContentFactory = content.CopyTo;
 
 						var stream = await wrequest.GetRequestStreamAsync ().ConfigureAwait (false);
 						await request.Content.CopyToAsync (stream).ConfigureAwait (false);

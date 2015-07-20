@@ -539,6 +539,9 @@ class MsbuildGenerator {
 		case "/codepage":
 			CodePage = value;
 			return true;
+
+		case "/-getresourcestrings":
+			return true;
 		}
 
 		Console.WriteLine ("Failing with : {0}", arg);
@@ -1030,9 +1033,6 @@ public class Driver {
 		var makefileDeps =  (args.Length > 0 && args [0] == "deps");
 
 		var sln_gen = new SlnGenerator (slnVersion);
-		var two_sln_gen = new SlnGenerator (slnVersion);
-		var four_sln_gen = new SlnGenerator (slnVersion);
-		var three_five_sln_gen = new SlnGenerator (slnVersion);
 		var four_five_sln_gen = new SlnGenerator (slnVersion);
 		var projects = new Dictionary<string,MsbuildGenerator> ();
 
@@ -1061,10 +1061,7 @@ public class Driver {
 		Func<MsbuildGenerator.VsCsproj, bool> additionalFilter;
 		additionalFilter = fullSolutions ? (Func<MsbuildGenerator.VsCsproj, bool>)null : IsCommonLibrary;
 
-		FillSolution (two_sln_gen, MsbuildGenerator.profile_2_0, projects.Values, additionalFilter);
 		FillSolution (four_five_sln_gen, MsbuildGenerator.profile_4_5, projects.Values, additionalFilter);
-		FillSolution (four_sln_gen, MsbuildGenerator.profile_4_0, projects.Values, additionalFilter);
-		FillSolution (three_five_sln_gen, MsbuildGenerator.profile_3_5, projects.Values, additionalFilter);
 
 		var sb = new StringBuilder ();
 		sb.AppendLine ("WARNING: Skipped some project references, apparent duplicates in order.xml:");
@@ -1073,9 +1070,6 @@ public class Driver {
 		}
 		Console.WriteLine (sb.ToString ());
 
-		WriteSolution (two_sln_gen, MakeSolutionName (MsbuildGenerator.profile_2_0));
-		WriteSolution (three_five_sln_gen, MakeSolutionName (MsbuildGenerator.profile_3_5));
-		WriteSolution (four_sln_gen, MakeSolutionName (MsbuildGenerator.profile_4_0));
 		WriteSolution (four_five_sln_gen, MakeSolutionName (MsbuildGenerator.profile_4_5));
 
 		if (makefileDeps){

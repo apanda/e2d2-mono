@@ -5,7 +5,7 @@ NO_TESTS = yes
 
 include xbuild.make
 
-LOCAL_MCS_FLAGS = -r:$(XBUILD_FRAMEWORK) -r:$(XBUILD_UTILITIES) -r:$(XBUILD_ENGINE)
+LOCAL_MCS_FLAGS = -r:$(XBUILD_FRAMEWORK) -r:$(XBUILD_UTILITIES) -r:$(XBUILD_ENGINE) -r:$(XBUILD_MSTASKS)
 PROGRAM = xbuild.exe
 
 include ../../build/executable.make
@@ -58,9 +58,11 @@ install-pcl-targets:
 	$(MKINSTALLDIRS) $(DESTDIR)$(PORTABLE_TARGETS_DIR)/v4.0
 	$(INSTALL_DATA) targets/Microsoft.Portable.Common.targets $(DESTDIR)$(PORTABLE_TARGETS_DIR)/v4.0/Microsoft.Portable.Common.targets
 	$(INSTALL_DATA) targets/Microsoft.Portable.CSharp_4.0.targets $(DESTDIR)$(PORTABLE_TARGETS_DIR)/v4.0/Microsoft.Portable.CSharp.targets
+	$(INSTALL_DATA) targets/Microsoft.Portable.VisualBasic_4.0.targets $(DESTDIR)$(PORTABLE_TARGETS_DIR)/v4.0/Microsoft.Portable.VisualBasic.targets
 	$(MKINSTALLDIRS) $(DESTDIR)$(PORTABLE_TARGETS_DIR)/v4.5
 	$(INSTALL_DATA) targets/Microsoft.Portable.Common.targets $(DESTDIR)$(PORTABLE_TARGETS_DIR)/v4.5/Microsoft.Portable.Common.targets
 	$(INSTALL_DATA) targets/Microsoft.Portable.CSharp_4.5.targets $(DESTDIR)$(PORTABLE_TARGETS_DIR)/v4.5/Microsoft.Portable.CSharp.targets
+	$(INSTALL_DATA) targets/Microsoft.Portable.VisualBasic_4.5.targets $(DESTDIR)$(PORTABLE_TARGETS_DIR)/v4.5/Microsoft.Portable.VisualBasic.targets
 	$(INSTALL_DATA) targets/Microsoft.Portable.Core.targets $(DESTDIR)$(PORTABLE_TARGETS_DIR)/Microsoft.Portable.Core.targets
 	$(INSTALL_DATA) targets/Microsoft.Portable.Core.props $(DESTDIR)$(PORTABLE_TARGETS_DIR)/Microsoft.Portable.Core.props
 
@@ -103,6 +105,8 @@ EXTRA_DISTFILES = \
 	frameworks/net_4.5.1.xml \
 	targets/Microsoft.Portable.CSharp_4.0.targets \
 	targets/Microsoft.Portable.CSharp_4.5.targets \
+	targets/Microsoft.Portable.VisualBasic_4.0.targets \
+	targets/Microsoft.Portable.VisualBasic_4.5.targets \
 	targets/Microsoft.Portable.Common.targets \
 	targets/Microsoft.Portable.Core.targets \
 	targets/Microsoft.Portable.Core.props \

@@ -5,7 +5,7 @@ noinst_SCRIPTS = mono-wrapper monodis-wrapper
 etctmp = etc
 symlinks = etc/mono/1.0/machine.config etc/mono/2.0/machine.config etc/mono/2.0/web.config etc/mono/browscap.ini etc/mono/2.0/Browsers/Compat.browser
 
-if INSTALL_4_5
+if INSTALL_4_x
 symlinks += etc/mono/4.0/machine.config etc/mono/4.0/web.config etc/mono/4.5/web.config etc/mono/4.5/machine.config etc/mono/4.0/Browsers/Compat.browser etc/mono/4.5/Browsers/Compat.browser
 endif
 
@@ -25,17 +25,11 @@ $(symlinks):
 
 SUPPORT_FILES = $(symlinks) mono-wrapper etc/mono/config
 
-if ONLY_MONOTOUCH
-build_profiles = monotouch
-else
-if ONLY_XAMMAC
-build_profiles = xammac
-else
 build_profiles = 
 
-if INSTALL_4_5
-build_profiles += binary_reference_assemblies net_4_5 xbuild_12 xbuild_14
-al_profile = net_4_5
+if INSTALL_4_x
+build_profiles += binary_reference_assemblies net_4_x xbuild_12 xbuild_14
+al_profile = net_4_x
 endif
 
 if INSTALL_MONODROID
@@ -43,17 +37,14 @@ build_profiles += monodroid
 endif
 
 if INSTALL_MONOTOUCH
-build_profiles += monotouch monotouch_runtime
+build_profiles += monotouch monotouch_runtime monotouch_watch
 endif
 
 if INSTALL_XAMMAC
-build_profiles += xammac
+build_profiles += xammac xammac_net_4_5
 endif
 
 test_profiles = $(build_profiles)
-
-endif
-endif
 
 if BUILD_MCS
 
@@ -79,11 +70,9 @@ install-data:
 uninstall:
 	cd $(mcs_topdir) && $(MAKE) NO_DIR_CHECK=1 PROFILES='$(build_profiles)' RUNTIME_HAS_CONSISTENT_GACDIR=yes prefix=$(prefix) uninstall-profiles
 
-## mono --wapi=semdel will probably not delete the semaphore if someone is crazy enough to do a 'make -j distclean' :-)
 clean-local:
 	cd $(mcs_topdir) && $(MAKE) NO_DIR_CHECK=1 PROFILES='$(build_profiles)' clean-profiles
-	-./mono-wrapper --wapi=semdel
-	-rm -fr $(etctmp) $(tmpinst) .wapi
+	-rm -fr $(etctmp) $(tmpinst)
 
 endif BUILD_MCS
 
@@ -118,9 +107,9 @@ mcs-compileall: mono-wrapper etc/mono/config
           continue; \
       fi; \
 	  if [ "xbuild_12" = "$$profile" ]; then \
-		  MONO_PATH="$$mcs_topdir/class/lib/$$profile$(PLATFORM_PATH_SEPARATOR)$$mcs_topdir/class/lib/net_4_5$(PLATFORM_PATH_SEPARATOR)$$save_MONO_PATH"; \
+		  MONO_PATH="$$mcs_topdir/class/lib/$$profile$(PLATFORM_PATH_SEPARATOR)$$mcs_topdir/class/lib/net_4_x$(PLATFORM_PATH_SEPARATOR)$$save_MONO_PATH"; \
 	  elif [ "xbuild_14" = "$$profile" ]; then \
-		  MONO_PATH="$$mcs_topdir/class/lib/$$profile$(PLATFORM_PATH_SEPARATOR)$$mcs_topdir/class/lib/net_4_5$(PLATFORM_PATH_SEPARATOR)$$save_MONO_PATH"; \
+		  MONO_PATH="$$mcs_topdir/class/lib/$$profile$(PLATFORM_PATH_SEPARATOR)$$mcs_topdir/class/lib/net_4_x$(PLATFORM_PATH_SEPARATOR)$$save_MONO_PATH"; \
 	  else \
 		  MONO_PATH="$$mcs_topdir/class/lib/$$profile$(PLATFORM_PATH_SEPARATOR)$$save_MONO_PATH"; \
 	  fi; \

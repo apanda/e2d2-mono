@@ -3,27 +3,14 @@ SUBDIRS =
 include ../../build/rules.make
 
 LIBRARY = System.Data.Linq.dll
+LIB_REFS = System System.Core System.Xml System.Data System.Runtime.Serialization
 LIB_MCS_FLAGS = \
-	        /r:System.dll \
-	        /r:System.Core.dll \
-	        /r:System.Xml.dll \
-	        /r:System.Data.dll \
-	        /r:System.Runtime.Serialization.dll \
 	        /resource:./src/DbLinq/Schema/Dbml/DbmlSchema.xsd,DbLinq.Schema.Dbml.DbmlSchema.xsd \
 		/d:MONO_STRICT /d:MONO_DEPLOY -warn:1
 
 TEST_MCS_FLAGS = $(LIB_MCS_FLAGS)
 
 EXTRA_DISTFILES = src/DbLinq/Schema/Dbml/DbmlSchema.xsd
-
-# This is a .NET 3.5+ assembly
-VALID_PROFILE := $(filter net_4_5, $(PROFILE))
-ifndef VALID_PROFILE
-LIBRARY_NAME = dummy-System.Data.Linq.dll
-NO_INSTALL = yes
-NO_SIGN_ASSEMBLY = yes
-NO_TEST = yes
-endif
 
 include ../../build/library.make
 

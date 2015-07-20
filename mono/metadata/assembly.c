@@ -28,6 +28,7 @@
 #include <mono/io-layer/io-layer.h>
 #include <mono/utils/mono-uri.h>
 #include <mono/metadata/mono-config.h>
+#include <mono/metadata/mono-config-dirs.h>
 #include <mono/utils/mono-digest.h>
 #include <mono/utils/mono-logger-internal.h>
 #include <mono/utils/mono-path.h>
@@ -74,6 +75,9 @@ static char **extra_gac_paths = NULL;
  * The integer number is an index in the MonoRuntimeInfo structure, whose
  * values can be found in domain.c - supported_runtimes. Look there
  * to understand what remapping will be made.
+ *
+ * .NET version can be found at https://github.com/dotnet/coreclr/blob/master/src/inc/fxretarget.h#L99
+ *
  */
 static const AssemblyVersionMap framework_assemblies [] = {
 	{"Accessibility", 0},
@@ -102,6 +106,7 @@ static const AssemblyVersionMap framework_assemblies [] = {
 	{"Npgsql", 0},
 	{"PEAPI", 0},
 	{"System", 0},
+	{"System.ComponentModel.Composition", 2},
 	{"System.ComponentModel.DataAnnotations", 2},
 	{"System.Configuration", 0},
 	{"System.Configuration.Install", 0},
@@ -117,6 +122,8 @@ static const AssemblyVersionMap framework_assemblies [] = {
 	{"System.Drawing", 0},
 	{"System.Drawing.Design", 0},
 	{"System.EnterpriseServices", 0},
+	{"System.IdentityModel", 3},
+	{"System.IdentityModel.Selectors", 3},
 	{"System.Management", 0},
 	{"System.Messaging", 0},
 	{"System.Net", 2},
@@ -124,6 +131,7 @@ static const AssemblyVersionMap framework_assemblies [] = {
 	{"System.Runtime.Serialization", 3},
 	{"System.Runtime.Serialization.Formatters.Soap", 0},
 	{"System.Security", 0},
+	{"System.ServiceModel", 3},
 	{"System.ServiceModel.Web", 2},
 	{"System.ServiceProcess", 0},
 	{"System.Transactions", 0},
@@ -562,14 +570,10 @@ mono_assembly_getrootdir (void)
 void
 mono_set_dirs (const char *assembly_dir, const char *config_dir)
 {
-#if defined (MONO_ASSEMBLIES)
 	if (assembly_dir == NULL)
-		assembly_dir = MONO_ASSEMBLIES;
-#endif
-#if defined (MONO_CFG_DIR)
+		assembly_dir = mono_config_get_assemblies_dir ();
 	if (config_dir == NULL)
-		config_dir = MONO_CFG_DIR;
-#endif
+		config_dir = mono_config_get_cfg_dir ();
 	mono_assembly_setrootdir (assembly_dir);
 	mono_set_config_dir (config_dir);
 }
@@ -601,7 +605,7 @@ compute_base (char *path)
 static void
 fallback (void)
 {
-	mono_set_dirs (MONO_ASSEMBLIES, MONO_CFG_DIR);
+	mono_set_dirs (mono_config_get_assemblies_dir (), mono_config_get_cfg_dir ());
 }
 
 static G_GNUC_UNUSED void
@@ -610,11 +614,14 @@ set_dirs (char *exe)
 	char *base;
 	char *config, *lib, *mono;
 	struct stat buf;
+	const char *bindir;
 	
 	/*
 	 * Only /usr prefix is treated specially
 	 */
-	if (strncmp (exe, MONO_BINDIR, strlen (MONO_BINDIR)) == 0 || (base = compute_base (exe)) == NULL){
+	bindir = mono_config_get_bin_dir ();
+	g_assert (bindir);
+	if (strncmp (exe, bindir, strlen (bindir)) == 0 || (base = compute_base (exe)) == NULL){
 		fallback ();
 		return;
 	}
@@ -1673,7 +1680,6 @@ mono_assembly_load_friends (MonoAssembly* ass)
 		MonoCustomAttrEntry *attr = &attrs->attrs [i];
 		MonoAssemblyName *aname;
 		const gchar *data;
-		guint slen;
 		/* Do some sanity checking */
 		if (!attr->ctor || attr->ctor->klass != mono_defaults.internals_visible_class)
 			continue;
@@ -1683,7 +1689,7 @@ mono_assembly_load_friends (MonoAssembly* ass)
 		/* 0xFF means null string, see custom attr format */
 		if (data [0] != 1 || data [1] != 0 || (data [2] & 0xFF) == 0xFF)
 			continue;
-		slen = mono_metadata_decode_value (data + 2, &data);
+		mono_metadata_decode_value (data + 2, &data);
 		aname = g_new0 (MonoAssemblyName, 1);
 		/*g_print ("friend ass: %s\n", data);*/
 		if (mono_assembly_name_parse_full (data, aname, TRUE, NULL, NULL)) {

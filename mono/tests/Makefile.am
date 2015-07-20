@@ -1,4 +1,4 @@
-SUBDIRS = cas assemblyresolve gc-descriptors
+SUBDIRS = assemblyresolve gc-descriptors
 
 check-local: assemblyresolve/test/asm.dll testjit test-generic-sharing test-type-load test-cattr-type-load test-reflection-load-with-context test_platform test-process-exit test-messages rm-empty-logs
 check-full: test-sgen check-local
@@ -13,24 +13,28 @@ TEST_PROG = ../interpreter/mint
 
 JITTEST_PROG = $(if $(VALGRIND), valgrind $(VALGRIND_ARGS),) $(if $(SGEN),$(top_builddir)/mono/mini/mono-sgen,$(top_builddir)/mono/mini/mono)
 
-TEST_PROG_RUN = MONO_SHARED_DIR=$(mono_build_root)/runtime MONO_CFG_DIR=$(mono_build_root)/runtime/etc $(LIBTOOL) --mode=execute $(TEST_PROG)
-JITTEST_PROG_RUN = MONO_SHARED_DIR=$(mono_build_root)/runtime MONO_CFG_DIR=$(mono_build_root)/runtime/etc $(LIBTOOL) --mode=execute $(JITTEST_PROG)
+TEST_PROG_RUN = MONO_CFG_DIR=$(mono_build_root)/runtime/etc $(LIBTOOL) --mode=execute $(TEST_PROG)
+JITTEST_PROG_RUN = MONO_CFG_DIR=$(mono_build_root)/runtime/etc $(LIBTOOL) --mode=execute $(JITTEST_PROG)
 
 RUNTIME_ARGS=--config tests-config --optimize=all --debug
 
-with_mono_path = MONO_PATH=$(mcs_topdir)/class/lib/net_4_5
+-include $(mcs_topdir)/build/config.make
+
+CLASS=$(mcs_topdir)/class/lib/$(DEFAULT_PROFILE)
+
+with_mono_path = MONO_PATH=$(CLASS)
 
 RUNTIME = $(with_mono_path) $(top_builddir)/runtime/mono-wrapper
 
 MKBUNDLE = \
 	PKG_CONFIG_PATH=$(top_builddir):$(PKG_CONFIG_PATH) \
-	$(RUNTIME) $(mcs_topdir)/class/lib/net_4_5/mkbundle.exe
+	$(RUNTIME) $(CLASS)/mkbundle.exe
 
 MCS = $(RUNTIME) $(mcs_topdir)/class/lib/build/mcs.exe -unsafe -debug \
 	-nowarn:0162 -nowarn:0168 -nowarn:0219 -nowarn:0414 -nowarn:0618 \
 	-nowarn:0169 -nowarn:1690 -nowarn:0649 -nowarn:0612 -nowarn:3021 \
 	-nowarn:0197
-ILASM = $(RUNTIME) $(mcs_topdir)/class/lib/net_4_5/ilasm.exe
+ILASM = $(RUNTIME) $(CLASS)/ilasm.exe
 
 BENCHSRC=fib.cs random.cs nested-loops.cs ackermann.cs tight-loop.cs sieve.cs
 
@@ -90,6 +94,7 @@ BASE_TEST_CS_SRC=		\
 	exception15.cs		\
 	exception16.cs		\
 	exception17.cs		\
+	exception18.cs		\
 	typeload-unaligned.cs	\
 	struct.cs		\
 	valuetype-gettype.cs	\
@@ -139,6 +144,7 @@ BASE_TEST_CS_SRC=		\
 	many-locals.cs		\
 	string-compare.cs	\
 	test-prime.cs		\
+	test-tls.cs		\
 	params.cs		\
 	reflection.cs		\
 	interface.cs		\
@@ -178,6 +184,8 @@ BASE_TEST_CS_SRC=		\
 	delegate7.cs		\
 	delegate8.cs		\
 	delegate9.cs		\
+	delegate10.cs		\
+	delegate11.cs		\
 	remoting1.cs		\
 	remoting2.cs		\
 	remoting3.cs		\
@@ -307,6 +315,7 @@ BASE_TEST_CS_SRC=		\
 	generic-typedef.2.cs	\
 	generic-marshalbyref.2.cs	\
 	generic-xdomain.2.cs	\
+	dynamic-generic-size.cs	\
 	bug-431413.2.cs	\
 	bug-459285.2.cs	\
 	generic-virtual-invoke.2.cs	\
@@ -407,6 +416,7 @@ BASE_TEST_CS_SRC=		\
 	thread_static_gc_layout.cs \
 	sleep.cs \
 	bug-27147.cs	\
+	bug-30085.cs	\
 	bug-17537.cs
 
 TEST_CS_SRC_DIST=	\
@@ -451,6 +461,11 @@ endif
 if POWERPC
 # bug #71274
 PLATFORM_DISABLED_TESTS=finalizer-abort.exe finalizer-exception.exe finalizer-exit.exe
+endif
+
+if POWERPC64
+# These tests hang
+PLATFORM_DISABLED_TESTS=monitor.exe finalizer-abort.exe finalizer-exception.exe finalizer-exit.exe
 endif
 
 if ARM
@@ -556,11 +571,13 @@ endif
 # bug-459094.exe creates an extremely deep directory tree
 # delegate-invoke.exe depends on 929c6bc9b6d76a273f251e6f5dfacac36e9c38bd which was
 # reverted.
+# bug-Xamarin-5278.exe got broken by 5d26590e79da139a284459299aee95c25f4cd835
 DISABLED_TESTS=			\
 	delegate-async-exception.exe	\
 	bug-348522.2.exe	\
 	bug-459094.exe \
 	delegate-invoke.exe \
+	bug-Xamarin-5278.exe \
 	$(PLATFORM_DISABLED_TESTS) \
 	$(EXTRA_DISABLED_TESTS)
 
@@ -666,7 +683,7 @@ TESTSI_IL=$(TEST_IL_SRC:.il=.exe)
 TESTBS=$(BENCHSRC:.cs=.exe)
 STRESS_TESTS=$(STRESS_TESTS_SRC:.cs=.exe)
 
-EXTRA_DIST=test-driver $(TEST_CS_SRC_DIST) $(TEST_IL_SRC) \
+EXTRA_DIST=test-driver test-runner.cs $(TEST_CS_SRC_DIST) $(TEST_IL_SRC) \
 	$(BENCHSRC) $(STRESS_TESTS_SRC) stress-runner.pl $(PREREQ_IL_SRC) $(PREREQ_CS_SRC)
 
 %.exe: %.il
@@ -724,7 +741,7 @@ test-messages:
 else
 test-messages: w32message.exe
 	> test_messages.zero
-	$(with_mono_path) $(JITTEST_PROG_RUN) w32message.exe >& w32message.allout && cmp test_messages.zero w32message.allout
+	$(with_mono_path) $(JITTEST_PROG_RUN) w32message.exe > w32message.allout 2>&1 && cmp test_messages.zero w32message.allout
 endif
 endif
 
@@ -884,7 +901,7 @@ stresstest: $(STRESS_TESTS)
 testbundle: console.exe
 	@echo "Testing mkbundle..."
 	@$(MKBUNDLE) --static console.exe > mkbundle.stdout
-	@$(with_mono_path) MONO_CFG_DIR=$(mono_cfg_dir) MONO_SHARED_DIR=$(mono_build_root)/runtime ./a.out >> mkbundle.stdout
+	@$(with_mono_path) MONO_CFG_DIR=$(mono_cfg_dir) ./a.out >> mkbundle.stdout
 	@- rm -rf a.out
 
 EXTRA_DIST += load-missing.il t-missing.cs load-exceptions.cs
@@ -1079,7 +1096,7 @@ test-aot:
 	@failed=0; \
 	passed=0; \
 	failed_tests="";\
-	profile=net_4_5;	\
+	profile=$(DEFAULT_PROFILE);	\
 	tmpfile=`mktemp -t mono_aot_output` || exit 1;	\
 	rm -f test-aot-$${name}.stdout test-aot-$${name}.stderr; \
 	for assembly in $(mcs_topdir)/class/lib/$$profile/*.dll	; do	\
@@ -1273,11 +1290,11 @@ GSHARED_TESTS = \
 test-generic-sharing-normal: $(GSHARED_TESTS)
 	@for fn in $+ ; do	\
 		echo "Testing $$fn ...";	\
-		MONO_GENERIC_SHARING=all $(RUNTIME) -O=gshared                $$fn > $$fn.stdout || exit 1;	\
-		MONO_GENERIC_SHARING=all $(RUNTIME) -O=gshared,shared         $$fn > $$fn.stdout || exit 1;	\
-		MONO_GENERIC_SHARING=all $(RUNTIME) -O=gshared,-inline        $$fn > $$fn.stdout || exit 1;	\
-		MONO_GENERIC_SHARING=all $(RUNTIME) -O=gshared,-inline,shared $$fn > $fn.stdout || exit 1;	\
-		if [ x$(AOT) = x1 ]; then MONO_GENERIC_SHARING=all $(with_mono_path) $(JITTEST_PROG_RUN) --aot --debug $$fn > /dev/null || exit 1; MONO_GENERIC_SHARING=all $(RUNTIME) $$fn > $$fn.stdout || exit 1; fi; \
+		$(RUNTIME) -O=gshared                $$fn > $$fn.stdout || exit 1;	\
+		$(RUNTIME) -O=gshared,shared         $$fn > $$fn.stdout || exit 1;	\
+		$(RUNTIME) -O=gshared,-inline        $$fn > $$fn.stdout || exit 1;	\
+		$(RUNTIME) -O=gshared,-inline,shared $$fn > $fn.stdout || exit 1;	\
+		if [ x$(AOT) = x1 ]; then $(with_mono_path) $(JITTEST_PROG_RUN) --aot --debug $$fn > /dev/null || exit 1; $(RUNTIME) $$fn > $$fn.stdout || exit 1; fi; \
 	done
 
 test-generic-sharing-managed: test-runner.exe $(GSHARED_TESTS)
@@ -1287,7 +1304,7 @@ if NACL_CODEGEN
 test-generic-sharing:
 else
 test-generic-sharing:
-	@if test x$(M) != x; then $(MAKE) test-generic-sharing-managed; else $(MAKE) test-generic-sharing-normal; fi
+	@if test x$(M) != x0; then $(MAKE) test-generic-sharing-managed; else $(MAKE) test-generic-sharing-normal; fi
 endif
 
 EXTRA_DIST += async-exceptions.cs
