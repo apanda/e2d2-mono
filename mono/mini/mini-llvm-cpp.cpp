@@ -23,12 +23,16 @@
 #include "config.h"
 
 #include <stdint.h>
+#include <iostream>
 
 #include <llvm/Support/raw_ostream.h>
 #include <llvm/Support/Host.h>
 #include <llvm/PassManager.h>
+#include <llvm/ExecutionEngine/MCJIT.h>
 #include <llvm/ExecutionEngine/ExecutionEngine.h>
-#include <llvm/ExecutionEngine/JITMemoryManager.h>
+#include <llvm/ExecutionEngine/RTDyldMemoryManager.h>
+#include <llvm/ExecutionEngine/SectionMemoryManager.h>
+#include <llvm/IR/DataLayout.h>
 #include <llvm/ExecutionEngine/JITEventListener.h>
 #include <llvm/Target/TargetOptions.h>
 #include <llvm/Target/TargetRegisterInfo.h>
@@ -60,86 +64,31 @@ using namespace llvm;
 
 #ifndef MONO_CROSS_COMPILE
 
-class MonoJITMemoryManager : public JITMemoryManager
+class MonoJITMemoryManager : public SectionMemoryManager
 {
-private:
-	JITMemoryManager *mm;
-
 public:
 	/* Callbacks installed by mono */
 	AllocCodeMemoryCb *alloc_cb;
 	DlSymCb *dlsym_cb;
 	ExceptionTableCb *exception_cb;
 
-	MonoJITMemoryManager ();
-	~MonoJITMemoryManager ();
+	MonoJITMemoryManager () {}
+	~MonoJITMemoryManager () {}
 
-	void setMemoryWritable (void);
 
-	void setMemoryExecutable (void);
+	//virtual uint8_t *allocateCodeSection(uintptr_t Size, unsigned Alignment, unsigned SectionID,
+										 //StringRef SectionName) {
+		//// FIXME:
+		//assert(0);
+		//return NULL;
+	//}
 
-	void AllocateGOT();
-
-    unsigned char *getGOTBase() const {
-		return mm->getGOTBase ();
-    }
-
-	void setPoisonMemory(bool) {
-	}
-
-	unsigned char *startFunctionBody(const Function *F, 
-									 uintptr_t &ActualSize);
-  
-	unsigned char *allocateStub(const GlobalValue* F, unsigned StubSize,
-								 unsigned Alignment);
-  
-	void endFunctionBody(const Function *F, unsigned char *FunctionStart,
-						 unsigned char *FunctionEnd);
-
-	unsigned char *allocateSpace(intptr_t Size, unsigned Alignment);
-
-	uint8_t *allocateGlobal(uintptr_t Size, unsigned Alignment);
-  
-	void deallocateMemForFunction(const Function *F);
-  
-	unsigned char*startExceptionTable(const Function* F,
-									  uintptr_t &ActualSize);
-  
-	void endExceptionTable(const Function *F, unsigned char *TableStart,
-						   unsigned char *TableEnd, 
-						   unsigned char* FrameRegister);
-
-	virtual void deallocateFunctionBody(void*) {
-	}
-
-	virtual void deallocateExceptionTable(void*) {
-	}
-
-	virtual uint8_t *allocateCodeSection(uintptr_t Size, unsigned Alignment, unsigned SectionID,
-										 StringRef SectionName) {
-		// FIXME:
-		assert(0);
-		return NULL;
-	}
-
-	virtual uint8_t *allocateDataSection(uintptr_t Size, unsigned Alignment, unsigned SectionID,
-										 StringRef SectionName, bool IsReadOnly) {
-		// FIXME:
-		assert(0);
-		return NULL;
-	}
-
-	virtual bool applyPermissions(std::string*) {
-		// FIXME:
-		assert(0);
-		return false;
-	}
-
-	virtual bool finalizeMemory(std::string *ErrMsg = 0) {
-		// FIXME:
-		assert(0);
-		return false;
-	}
+	//virtual uint8_t *allocateDataSection(uintptr_t Size, unsigned Alignment, unsigned SectionID,
+										 //StringRef SectionName, bool IsReadOnly) {
+		//// FIXME:
+		//assert(0);
+		//return NULL;
+	//}
 
 	virtual void* getPointerToNamedFunction(const std::string &Name, bool AbortOnFailure) {
 		void *res;
@@ -153,88 +102,11 @@ public:
 		}
 		return res;
 	}
+	
+	//virtual bool finalizeMemory(std::string *ErrMsg = nullptr) {
+		//return false;
+	//}
 };
-
-MonoJITMemoryManager::MonoJITMemoryManager ()
-{
-	mm = JITMemoryManager::CreateDefaultMemManager ();
-}
-
-MonoJITMemoryManager::~MonoJITMemoryManager ()
-{
-	delete mm;
-}
-
-void
-MonoJITMemoryManager::setMemoryWritable (void)
-{
-}
-
-void
-MonoJITMemoryManager::setMemoryExecutable (void)
-{
-}
-
-void
-MonoJITMemoryManager::AllocateGOT()
-{
-	mm->AllocateGOT ();
-}
-
-unsigned char *
-MonoJITMemoryManager::startFunctionBody(const Function *F, 
-					uintptr_t &ActualSize)
-{
-	// FIXME: This leaks memory
-	if (ActualSize == 0)
-		ActualSize = 128;
-	return alloc_cb (wrap (F), ActualSize);
-}
-  
-unsigned char *
-MonoJITMemoryManager::allocateStub(const GlobalValue* F, unsigned StubSize,
-			   unsigned Alignment)
-{
-	return alloc_cb (wrap (F), StubSize);
-}
-  
-void
-MonoJITMemoryManager::endFunctionBody(const Function *F, unsigned char *FunctionStart,
-				  unsigned char *FunctionEnd)
-{
-}
-
-unsigned char *
-MonoJITMemoryManager::allocateSpace(intptr_t Size, unsigned Alignment)
-{
-	return new unsigned char [Size];
-}
-
-uint8_t *
-MonoJITMemoryManager::allocateGlobal(uintptr_t Size, unsigned Alignment)
-{
-	return new unsigned char [Size];
-}
-
-void
-MonoJITMemoryManager::deallocateMemForFunction(const Function *F)
-{
-}
-  
-unsigned char*
-MonoJITMemoryManager::startExceptionTable(const Function* F,
-					  uintptr_t &ActualSize)
-{
-	return startFunctionBody(F, ActualSize);
-}
-  
-void
-MonoJITMemoryManager::endExceptionTable(const Function *F, unsigned char *TableStart,
-					unsigned char *TableEnd, 
-					unsigned char* FrameRegister)
-{
-	exception_cb (FrameRegister);
-}
 
 #else
 
@@ -262,7 +134,7 @@ public:
 class MonoEE {
 public:
 	ExecutionEngine *EE;
-	MonoJITMemoryManager *mm;
+	//MonoJITMemoryManager *mm;
 	MonoJITEventListener *listener;
 	FunctionPassManager *fpm;
 };
@@ -627,12 +499,10 @@ mono_llvm_create_ee (LLVMModuleProviderRef MP, AllocCodeMemoryCb *alloc_cb, Func
   init_llvm ();
 
   mono_ee = new MonoEE ();
-
-  MonoJITMemoryManager *mono_mm = new MonoJITMemoryManager ();
-  mono_mm->alloc_cb = alloc_cb;
-  mono_mm->dlsym_cb = dlsym_cb;
-  mono_mm->exception_cb = exception_cb;
-  mono_ee->mm = mono_mm;
+  std::unique_ptr<MonoJITMemoryManager> monoPtr(new MonoJITMemoryManager());
+  //MonoJITMemoryManager *mono_mm = monoPtr.get();
+  monoPtr->dlsym_cb = dlsym_cb;
+  monoPtr->exception_cb = exception_cb;
 
   /*
    * The Default code model doesn't seem to work on amd64,
@@ -641,18 +511,22 @@ mono_llvm_create_ee (LLVMModuleProviderRef MP, AllocCodeMemoryCb *alloc_cb, Func
    */
 
   TargetOptions opts;
-  opts.JITExceptionHandling = 1;
+  //opts.JITExceptionHandling = 1;
 
   StringRef cpu_name = sys::getHostCPUName ();
-
+  std::string errorString;
   // EngineBuilder no longer has a copy assignment operator (?)
   std::unique_ptr<Module> Owner(unwrap(MP));
+  Module* TheModule = unwrap(MP);
   EngineBuilder b (std::move(Owner));
+  b.setErrorStr(&errorString);
+  std::cout << "Setting the CPU to " << cpu_name.data() << std::endl;
 #ifdef TARGET_AMD64
-  ExecutionEngine *EE = b.setJITMemoryManager (mono_mm).setTargetOptions (opts).setAllocateGVsWithCode (true).setMCPU (cpu_name).setCodeModel (CodeModel::Large).create ();
+  ExecutionEngine *EE = b.setMCJITMemoryManager (std::move(monoPtr)).setTargetOptions (opts).setCodeModel (CodeModel::Large).create ();
 #else
-  ExecutionEngine *EE = b.setJITMemoryManager (mono_mm).setTargetOptions (opts).setAllocateGVsWithCode (true).setMCPU (cpu_name).create ();
+  ExecutionEngine *EE = b.setMCJITMemoryManager (std::move(monoPtr)).setTargetOptions (opts).setMCPU (cpu_name).create ();
 #endif
+  std::cout << "Error string is " << errorString << std::endl;
 
   g_assert (EE);
   mono_ee->EE = EE;
@@ -663,8 +537,8 @@ mono_llvm_create_ee (LLVMModuleProviderRef MP, AllocCodeMemoryCb *alloc_cb, Func
 
   FunctionPassManager *fpm = new FunctionPassManager (unwrap (MP));
   mono_ee->fpm = fpm;
-
-  fpm->add(new DataLayoutPass(*EE->getDataLayout()));
+  TheModule->setDataLayout(EE->getDataLayout());
+  fpm->add(new DataLayoutPass());
 
   if (PassList.size() > 0) {
 	  /* Use the passes specified by the env variable */

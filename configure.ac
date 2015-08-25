@@ -2662,26 +2662,26 @@ if test "x$enable_llvm" = "xyes"; then
       # No need for jit libs
       LLVM_LIBS=`$LLVM_CONFIG --libs core bitwriter`
    else
-      LLVM_LIBS=`$LLVM_CONFIG --libs core bitwriter jit mcjit $llvm_codegen`
+      LLVM_LIBS=`$LLVM_CONFIG --libs core bitwriter mcjit $llvm_codegen`
    fi
    LLVM_LIBS="$LLVM_LIBS $LLVM_LDFLAGS $LLVM_SYSTEM_LIBS -lstdc++"
 
-   expected_llvm_version="3.4svn-mono-mono/e656cac"
+   #expected_llvm_version="3.4svn-mono-mono/e656cac"
 
-   # Should be something like '2.6' or '2.7svn'
-   llvm_version=`$LLVM_CONFIG --version`
-   llvm_api_version=`$LLVM_CONFIG --mono-api-version 2>/dev/null`
-   AC_MSG_CHECKING(LLVM version)
-   AC_MSG_RESULT($llvm_version)
-   if echo $llvm_version | grep -q 'mono'; then
-	  if test "x$enable_llvm_version_check" == "xyes"; then
-	  	 if test "$llvm_version" != "$expected_llvm_version"; then
-	  	 	AC_MSG_ERROR([Expected llvm version $expected_llvm_version, but llvm-config --version returned $llvm_version"])
-	  	 fi
-	  fi
-   else
-	  AC_MSG_ERROR([Compiling with stock LLVM is not supported, please use the Mono LLVM repo at https://github.com/mono/llvm, with the GIT branch which matches this version of mono, i.e. 'mono-2-10' for Mono 2.10.])
-   fi
+   ## Should be something like '2.6' or '2.7svn'
+   #llvm_version=`$LLVM_CONFIG --version`
+   #llvm_api_version=`$LLVM_CONFIG --mono-api-version 2>/dev/null`
+   #AC_MSG_CHECKING(LLVM version)
+   #AC_MSG_RESULT($llvm_version)
+   #if echo $llvm_version | grep -q 'mono'; then
+	  #if test "x$enable_llvm_version_check" == "xyes"; then
+		   #if test "$llvm_version" != "$expected_llvm_version"; then
+			   #AC_MSG_ERROR([Expected llvm version $expected_llvm_version, but llvm-config --version returned $llvm_version"])
+		   #fi
+	  #fi
+   #else
+	  #AC_MSG_ERROR([Compiling with stock LLVM is not supported, please use the Mono LLVM repo at https://github.com/mono/llvm, with the GIT branch which matches this version of mono, i.e. 'mono-2-10' for Mono 2.10.])
+   #fi
 
    else
        LLVM_CFLAGS="-I$with_llvm/include -DNDEBUG -D__NO_CTYPE_INLINE -D_GNU_SOURCE -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS"

@@ -36,10 +36,6 @@ void bzero (void *to, size_t count) { memset (to, 0, count); }
 
 #endif
 
-#if LLVM_API_VERSION < 4
-#error "The version of the mono llvm repository is too old."
-#endif
-
  /*
   * Information associated by mono with LLVM modules.
   */
