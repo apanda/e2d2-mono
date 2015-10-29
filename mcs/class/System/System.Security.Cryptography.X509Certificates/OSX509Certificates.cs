@@ -93,7 +93,7 @@ namespace System.Security.Cryptography.X509Certificates {
 			}
 		}
 		
-		public static SecTrustResult TrustEvaluateSsl (MSX.X509CertificateCollection certificates, string host)
+		public static SecTrustResult TrustEvaluateSsl (X509Certificate2Collection certificates, string host)
 		{
 			if (certificates == null)
 				return SecTrustResult.Deny;
@@ -104,8 +104,8 @@ namespace System.Security.Cryptography.X509Certificates {
 				return SecTrustResult.Deny;
 			}
 		}
-		
-		static SecTrustResult _TrustEvaluateSsl (MSX.X509CertificateCollection certificates, string hostName)
+
+		static SecTrustResult _TrustEvaluateSsl (X509Certificate2Collection certificates, string hostName)
 		{
 			int certCount = certificates.Count;
 			IntPtr [] cfDataPtrs = new IntPtr [certCount];

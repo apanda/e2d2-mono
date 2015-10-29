@@ -559,12 +559,14 @@ ms_alloc_block (int size_index, gboolean pinned, gboolean has_references)
 	add_free_block (free_blocks, size_index, info);
 
 	/*
-	 * This is the only place where the `allocated_blocks` array can potentially grow.
-	 * We need to make sure concurrent sweep isn't running when that happens, so in that
-	 * specific case we just wait for sweep to finish.
+	 * Adding to the allocated_blocks array is racy with the removal of nulls when
+	 * sweeping. We wait for sweep to finish to avoid that.
+	 *
+	 * The memory barrier here and in `sweep_job_func()` are required because we need
+	 * `allocated_blocks` synchronized between this and the sweep thread.
 	 */
-	if (sgen_pointer_queue_will_grow (&allocated_blocks))
-		major_finish_sweep_checking ();
+	major_finish_sweep_checking ();
+	mono_memory_barrier ();
 
 	sgen_pointer_queue_add (&allocated_blocks, BLOCK_TAG (info));
 
@@ -739,7 +741,9 @@ free_pinned_object (GCObject *obj, size_t size)
 static GCObject*
 major_alloc_degraded (GCVTable vtable, size_t size)
 {
-	GCObject *obj = alloc_obj (vtable, size, FALSE, SGEN_VTABLE_HAS_REFERENCES (vtable));
+	GCObject *obj;
+
+	obj = alloc_obj (vtable, size, FALSE, SGEN_VTABLE_HAS_REFERENCES (vtable));
 	if (G_LIKELY (obj)) {
 		HEAVY_STAT (++stat_objects_alloced_degraded);
 		HEAVY_STAT (stat_bytes_alloced_degraded += size);
@@ -1619,6 +1623,7 @@ sweep_job_func (void *thread_data_untyped, SgenThreadPoolJob *job)
 	}
 
 	sgen_pointer_queue_remove_nulls (&allocated_blocks);
+	mono_memory_barrier ();
 
 	sweep_finish ();
 

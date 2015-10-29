@@ -96,13 +96,18 @@
 #include <mono/utils/mono-proclib.h>
 
 /* The process' environment strings */
-#if defined(__APPLE__) && !defined (__arm__) && !defined (__aarch64__)
+#if defined(__APPLE__)
+#if defined (TARGET_OSX)
 /* Apple defines this in crt_externs.h but doesn't provide that header for 
  * arm-apple-darwin9.  We'll manually define the symbol on Apple as it does
  * in fact exist on all implementations (so far) 
  */
-char ***_NSGetEnviron(void);
+gchar ***_NSGetEnviron(void);
 #define environ (*_NSGetEnviron())
+#else
+static char *mono_environ[1] = { NULL };
+#define environ mono_environ
+#endif /* defined (TARGET_OSX) */
 #else
 extern char **environ;
 #endif
@@ -178,7 +183,9 @@ is_pid_valid (pid_t pid)
 {
 	gboolean result = FALSE;
 
-#if defined(PLATFORM_MACOSX) || defined(__OpenBSD__) || defined(__FreeBSD__)
+#if defined(HOST_WATCHOS)
+	result = TRUE; // TODO: Rewrite using sysctl
+#elif defined(PLATFORM_MACOSX) || defined(__OpenBSD__) || defined(__FreeBSD__)
 	if (((kill(pid, 0) == 0) || (errno == EPERM)) && pid != 0)
 		result = TRUE;
 #elif defined(__HAIKU__)
@@ -552,6 +559,7 @@ gboolean CreateProcess (const gunichar2 *appname, const gunichar2 *cmdline,
 			WapiStartupInfo *startup,
 			WapiProcessInformation *process_info)
 {
+#if defined (HAVE_FORK) && defined (HAVE_EXECVE)
 	char *cmd = NULL, *prog = NULL, *full_prog = NULL, *args = NULL, *args_after_prog = NULL;
 	char *dir = NULL, **env_strings = NULL, **argv = NULL;
 	guint32 i, env_count = 0;
@@ -815,11 +823,11 @@ gboolean CreateProcess (const gunichar2 *appname, const gunichar2 *cmdline,
 
 		if (newapp != NULL) {
 			if (appname != NULL) {
-				newcmd = utf16_concat (newapp, utf16_space,
+				newcmd = utf16_concat (utf16_quote, newapp, utf16_quote, utf16_space,
 						       appname, utf16_space,
 						       cmdline, NULL);
 			} else {
-				newcmd = utf16_concat (newapp, utf16_space,
+				newcmd = utf16_concat (utf16_quote, newapp, utf16_quote, utf16_space,
 						       cmdline, NULL);
 			}
 			
@@ -1096,6 +1104,10 @@ free_strings:
 	mono_processes_cleanup ();
 	
 	return ret;
+#else
+	SetLastError (ERROR_NOT_SUPPORTED);
+	return FALSE;
+#endif // defined (HAVE_FORK) && defined (HAVE_EXECVE)
 }
 		
 static void
@@ -1768,7 +1780,7 @@ gboolean EnumProcessModules (gpointer process, gpointer *modules,
 			return FALSE;
 		}
 		pid = process_handle->id;
-		proc_name = process_handle->proc_name;
+		proc_name = g_strdup (process_handle->proc_name);
 	}
 	
 #if defined(PLATFORM_MACOSX) || defined(__OpenBSD__) || defined(__FreeBSD__) || defined(__HAIKU__)
@@ -1786,6 +1798,7 @@ gboolean EnumProcessModules (gpointer process, gpointer *modules,
 		 */
 		modules[0] = NULL;
 		*needed = sizeof(gpointer);
+		g_free (proc_name);
 		return TRUE;
 	}
 	mods = load_modules (fp);
@@ -1819,7 +1832,8 @@ gboolean EnumProcessModules (gpointer process, gpointer *modules,
 		free_procmodule (g_slist_nth_data (mods, i));
 	}
 	g_slist_free (mods);
-
+	g_free (proc_name);
+	
 	return TRUE;
 }
 
@@ -1862,7 +1876,31 @@ get_process_name_from_proc (pid_t pid)
 	/* No proc name on OSX < 10.5 nor ppc nor iOS */
 	memset (buf, '\0', sizeof(buf));
 	proc_name (pid, buf, sizeof(buf));
-	if (strlen (buf) > 0)
+
+	// Fixes proc_name triming values to 15 characters #32539
+	if (strlen (buf) >= MAXCOMLEN - 1) {
+		char path_buf [PROC_PIDPATHINFO_MAXSIZE];
+		char *name_buf;
+		int path_len;
+
+		memset (path_buf, '\0', sizeof(path_buf));
+		path_len = proc_pidpath (pid, path_buf, sizeof(path_buf));
+
+		if (path_len > 0 && path_len < sizeof(path_buf)) {
+			name_buf = path_buf + path_len;
+			for(;name_buf > path_buf; name_buf--) {
+				if (name_buf [0] == '/') {
+					name_buf++;
+					break;
+				}
+			}
+
+			if (memcmp (buf, name_buf, MAXCOMLEN - 1) == 0)
+				ret = g_strdup (name_buf);
+		}
+	}
+
+	if (ret == NULL && strlen (buf) > 0)
 		ret = g_strdup (buf);
 #else
 	if (sysctl(mib, 4, NULL, &size, NULL, 0) < 0)
@@ -2169,6 +2207,53 @@ get_module_name (gpointer process, gpointer module,
 	return 0;
 }
 
+static guint32
+get_module_filename (gpointer process, gpointer module,
+					 gunichar2 *basename, guint32 size)
+{
+	int pid, len;
+	gsize bytes;
+	char *path;
+	gunichar2 *proc_path;
+	
+	size *= sizeof (gunichar2); /* adjust for unicode characters */
+
+	if (basename == NULL || size == 0)
+		return 0;
+
+	pid = GetProcessId (process);
+
+	path = wapi_process_get_path (pid);
+	if (path == NULL)
+		return 0;
+
+	proc_path = mono_unicode_from_external (path, &bytes);
+	g_free (path);
+
+	if (proc_path == NULL)
+		return 0;
+
+	len = (bytes / 2);
+	
+	/* Add the terminator */
+	bytes += 2;
+
+	if (size < bytes) {
+		DEBUG ("%s: Size %d smaller than needed (%ld); truncating", __func__, size, bytes);
+
+		memcpy (basename, proc_path, size);
+	} else {
+		DEBUG ("%s: Size %d larger than needed (%ld)",
+			   __func__, size, bytes);
+
+		memcpy (basename, proc_path, bytes);
+	}
+
+	g_free (proc_path);
+
+	return len;
+}
+
 guint32
 GetModuleBaseName (gpointer process, gpointer module,
 				   gunichar2 *basename, guint32 size)
@@ -2180,7 +2265,7 @@ guint32
 GetModuleFileNameEx (gpointer process, gpointer module,
 					 gunichar2 *filename, guint32 size)
 {
-	return get_module_name (process, module, filename, size, FALSE);
+	return get_module_filename (process, module, filename, size);
 }
 
 gboolean
@@ -2313,6 +2398,7 @@ SetProcessWorkingSetSize (gpointer process, size_t min, size_t max)
 gboolean
 TerminateProcess (gpointer process, gint32 exitCode)
 {
+#if defined(HAVE_KILL)
 	WapiHandle_process *process_handle;
 	int signo;
 	int ret;
@@ -2350,6 +2436,10 @@ TerminateProcess (gpointer process, gint32 exitCode)
 	}
 	
 	return (ret == 0);
+#else
+	g_error ("kill() is not supported by this platform");
+	return FALSE;
+#endif
 }
 
 guint32

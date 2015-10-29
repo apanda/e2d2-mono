@@ -1151,6 +1151,7 @@ mini_usage_jitdeveloper (void)
 		 "    --inject-async-exc METHOD OFFSET Inject an asynchronous exception at METHOD\n"
 		 "    --verify-all           Run the verifier on all assemblies and methods\n"
 		 "    --full-aot             Avoid JITting any code\n"
+		 "    --llvmonly             Use LLVM compiled code only\n"
 		 "    --agent=ASSEMBLY[:ARG] Loads the specific agent assembly and executes its Main method with the given argument before loading the main assembly.\n"
 		 "    --no-x86-stack-align   Don't align stack on x86\n"
 		 "\n"
@@ -1205,6 +1206,9 @@ mini_usage (void)
 		"                           Currently the only supported option is 'disable'.\n"
 		"    --llvm, --nollvm       Controls whenever the runtime uses LLVM to compile code.\n"
 	        "    --gc=[sgen,boehm]      Select SGen or Boehm GC (runs mono or mono-sgen)\n"
+#ifdef TARGET_OSX
+		"    --arch=[32,64]         Select architecture (runs mono32 or mono64)\n"
+#endif
 #ifdef HOST_WIN32
 	        "    --mixed-mode           Enable mixed-mode image support.\n"
 #endif
@@ -1462,6 +1466,36 @@ switch_gc (char* argv[], const char* target_gc)
 #endif
 }
 
+#ifdef TARGET_OSX
+
+static void
+switch_arch (char* argv[], const char* target_arch)
+{
+	GString *path;
+	gsize arch_offset;
+
+	if ((strcmp (target_arch, "32") == 0 && strcmp (ARCHITECTURE, "x86") == 0) ||
+		(strcmp (target_arch, "64") == 0 && strcmp (ARCHITECTURE, "amd64") == 0)) {
+		return; /* matching arch loaded */
+	}
+
+	path = g_string_new (argv [0]);
+	arch_offset = path->len -2; /* last two characters */
+
+	/* Remove arch suffix if present */
+	if (strstr (&path->str[arch_offset], "32") || strstr (&path->str[arch_offset], "64")) {
+		g_string_truncate (path, arch_offset);
+	}
+
+	g_string_append (path, target_arch);
+
+	if (execvp (path->str, argv) < 0) {
+		fprintf (stderr, "Error: --arch=%s Failed to switch to '%s'.\n", target_arch, path->str);
+		exit (1);
+	}
+}
+
+#endif
 /**
  * mono_main:
  * @argc: number of arguments in the argv array
@@ -1587,7 +1621,15 @@ mono_main (int argc, char* argv[])
 			switch_gc (argv, "sgen");
 		} else if (strcmp (argv [i], "--gc=boehm") == 0) {
 			switch_gc (argv, "boehm");
-		} else if (strcmp (argv [i], "--config") == 0) {
+		}
+#ifdef TARGET_OSX
+		else if (strcmp (argv [i], "--arch=32") == 0) {
+			switch_arch (argv, "32");
+		} else if (strcmp (argv [i], "--arch=64") == 0) {
+			switch_arch (argv, "64");
+		}
+#endif
+		else if (strcmp (argv [i], "--config") == 0) {
 			if (i +1 >= argc){
 				fprintf (stderr, "error: --config requires a filename argument\n");
 				return 1;
@@ -1646,6 +1688,9 @@ mono_main (int argc, char* argv[])
 			mono_verifier_enable_verify_all ();
 		} else if (strcmp (argv [i], "--full-aot") == 0) {
 			mono_aot_only = TRUE;
+		} else if (strcmp (argv [i], "--llvmonly") == 0) {
+			mono_aot_only = TRUE;
+			mono_llvm_only = TRUE;
 		} else if (strcmp (argv [i], "--print-vtable") == 0) {
 			mono_print_vtable = TRUE;
 		} else if (strcmp (argv [i], "--stats") == 0) {
@@ -2181,6 +2226,8 @@ void
 mono_jit_set_aot_only (gboolean val)
 {
 	mono_aot_only = val;
+	if (mono_aot_only)
+		mono_llvm_only = TRUE;
 }
 
 void
@@ -2238,4 +2285,82 @@ void
 mono_set_crash_chaining (gboolean chain_crashes)
 {
 	mono_do_crash_chaining = chain_crashes;
+}
+
+void
+mono_parse_env_options (int argc, char *argv [])
+{
+	const char *env_options = g_getenv ("MONO_ENV_OPTIONS");
+	if (env_options != NULL){
+		GPtrArray *array = g_ptr_array_new ();
+		GString *buffer = g_string_new ("");
+		const char *p;
+		unsigned i;
+		gboolean in_quotes = FALSE;
+		char quote_char = '\0';
+
+		for (p = env_options; *p; p++){
+			switch (*p){
+			case ' ': case '\t':
+				if (!in_quotes) {
+					if (buffer->len != 0){
+						g_ptr_array_add (array, g_strdup (buffer->str));
+						g_string_truncate (buffer, 0);
+					}
+				} else {
+					g_string_append_c (buffer, *p);
+				}
+				break;
+			case '\\':
+				if (p [1]){
+					g_string_append_c (buffer, p [1]);
+					p++;
+				}
+				break;
+			case '\'':
+			case '"':
+				if (in_quotes) {
+					if (quote_char == *p)
+						in_quotes = FALSE;
+					else
+						g_string_append_c (buffer, *p);
+				} else {
+					in_quotes = TRUE;
+					quote_char = *p;
+				}
+				break;
+			default:
+				g_string_append_c (buffer, *p);
+				break;
+			}
+		}
+		if (in_quotes) {
+			fprintf (stderr, "Unmatched quotes in value of MONO_ENV_OPTIONS: [%s]\n", env_options);
+			exit (1);
+		}
+			
+		if (buffer->len != 0)
+			g_ptr_array_add (array, g_strdup (buffer->str));
+		g_string_free (buffer, TRUE);
+
+		if (array->len > 0){
+			int new_argc = array->len + argc;
+			char **new_argv = g_new (char *, new_argc + 1);
+			int j;
+
+			new_argv [0] = argv [0];
+			
+			/* First the environment variable settings, to allow the command line options to override */
+			for (i = 0; i < array->len; i++)
+				new_argv [i+1] = g_ptr_array_index (array, i);
+			i++;
+			for (j = 1; j < argc; j++)
+				new_argv [i++] = argv [j];
+			new_argv [i] = NULL;
+
+			argc = new_argc;
+			argv = new_argv;
+		}
+		g_ptr_array_free (array, TRUE);
+	}
 }

@@ -407,7 +407,7 @@ emit_fde (MonoDwarfWriter *w, int fde_index, char *start_symbol, char *end_symbo
 	}
 
 	/* Convert the list of MonoUnwindOps to the format used by DWARF */	
-	uw_info = mono_unwind_ops_encode (l, &uw_info_len);
+	uw_info = mono_unwind_ops_encode_full (l, &uw_info_len, FALSE);
 	emit_bytes (w, uw_info, uw_info_len);
 	g_free (uw_info);
 
@@ -1057,7 +1057,7 @@ emit_class_dwarf_info (MonoDwarfWriter *w, MonoClass *klass, gboolean vtype)
 			const char *p;
 			MonoTypeEnum def_type;
 
-			if (strcmp ("value__", mono_field_get_name (field)) == 0)
+			if (!(field->type->attrs & FIELD_ATTRIBUTE_STATIC))
 				continue;
 			if (mono_field_is_deleted (field))
 				continue;

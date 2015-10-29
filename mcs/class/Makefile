@@ -46,10 +46,15 @@ mobile_common_dirs := \
 	System.ComponentModel.DataAnnotations \
 	System.ComponentModel.Composition.4.5 \
 	System.Net \
+	System.Net.Http	\
+	System.Net.Http.WebRequest	\
 	System.Windows \
 	System.Xml.Serialization \
 	Mono.CSharp	\
-	Microsoft.CSharp
+	Microsoft.CSharp \
+	Mono.Security.Providers.DotNet	\
+	Mono.Security.Providers.OldTls \
+	Mono.Security.Providers.NewSystemSource
 
 mobile_static_dirs := \
 	$(mobile_common_dirs)	\
@@ -59,8 +64,6 @@ mobile_static_dirs := \
 mobile_dynamic_dirs := \
 	$(mobile_common_dirs)	\
 	Mono.CompilerServices.SymbolWriter	\
-	System.Net.Http	\
-	System.Net.Http.WebRequest	\
 	$(pcl_facade_dirs)
 
 xammac_dirs := \
@@ -73,6 +76,7 @@ monotouch_dirs := \
 	$(mobile_static_dirs)
 
 monotouch_watch_dirs := $(monotouch_dirs)
+monotouch_tv_dirs   := $(monotouch_dirs)
 
 monotouch_runtime_dirs := \
 	corlib \
@@ -123,6 +127,9 @@ xammac_4_5_dirs := \
 	Mono.CompilerServices.SymbolWriter	\
 	System.Data.Linq		\
 	System.Net.Http \
+	Mono.Security.Providers.DotNet \
+	Mono.Security.Providers.OldTls \
+	Mono.Security.Providers.NewSystemSource \
 	$(pcl_facade_dirs)
 
 net_4_x_dirs := \
@@ -136,6 +143,8 @@ net_4_x_dirs := \
 	System.Security			\
 	System.Configuration	\
 	$(resgen_dir)			\
+	System.IO.Compression 		\
+	System.IO.Compression.FileSystem \
 	System.Drawing			\
 	System.Transactions		\
 	System.EnterpriseServices	\
@@ -246,10 +255,11 @@ net_4_x_parallel_dirs := \
 	System.Json.Microsoft \
 	System.Threading.Tasks.Dataflow \
 	System.ComponentModel.Composition.4.5 \
-	System.IO.Compression \
-	System.IO.Compression.FileSystem \
 	System.Windows \
 	System.Xml.Serialization \
+	Mono.Security.Providers.DotNet \
+	Mono.Security.Providers.OldTls \
+	Mono.Security.Providers.NewSystemSource \
 	System.DirectoryServices.Protocols	\
 	RabbitMQ.Client			\
 	Microsoft.VisualC		\
@@ -271,6 +281,7 @@ xbuild_4_0_dirs := \
 monodroid_SUBDIRS := $(monodroid_dirs)
 monotouch_SUBDIRS := $(monotouch_dirs)
 monotouch_watch_SUBDIRS := $(monotouch_watch_dirs)
+monotouch_tv_SUBDIRS    := $(monotouch_tv_dirs)
 monotouch_runtime_SUBDIRS := $(monotouch_runtime_dirs)
 mobile_static_SUBDIRS := $(mobile_static_dirs)
 mobile_SUBDIRS := $(mobile_dynamic_dirs)

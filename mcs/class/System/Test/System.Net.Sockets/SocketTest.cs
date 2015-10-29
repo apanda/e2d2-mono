@@ -9,8 +9,11 @@
 //
 
 using System;
+using System.Linq;
 using System.Collections;
 using System.Threading;
+using System.Reflection;
+using System.Text.RegularExpressions;
 using System.Net;
 using System.Net.Sockets;
 using NUnit.Framework;
@@ -3476,7 +3479,46 @@ namespace MonoTests.System.Net.Sockets
 			ss.Close ();
 			s.Close ();
 		}
-		
+
+		static bool? supportsPortReuse;
+		static bool SupportsPortReuse ()
+		{
+			if (supportsPortReuse.HasValue)
+				return supportsPortReuse.Value;
+
+			supportsPortReuse = (bool) typeof (Socket).GetMethod ("SupportsPortReuse",
+					BindingFlags.Static | BindingFlags.NonPublic)
+					.Invoke (null, new object [] {});
+			return supportsPortReuse.Value;
+		}
+
+		// Test case for bug #31557
+		[Test]
+		public void TcpDoubleBind ()
+		{
+			using (Socket s = new Socket (AddressFamily.InterNetwork,
+						SocketType.Stream, ProtocolType.Tcp))
+			using (Socket ss = new Socket (AddressFamily.InterNetwork,
+						SocketType.Stream, ProtocolType.Tcp)) {
+				s.SetSocketOption (SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+
+				s.Bind (new IPEndPoint (IPAddress.Any, 12345));
+				s.Listen(1);
+
+				ss.SetSocketOption (SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+
+				Exception ex = null;
+				try {
+					ss.Bind (new IPEndPoint (IPAddress.Any, 12345));
+					ss.Listen(1);
+				} catch (SocketException e) {
+					ex = e;
+				}
+
+				Assert.AreEqual (SupportsPortReuse (), ex == null);
+			}
+		}
+
 		[Test]
 		[Category ("NotOnMac")]
                 public void ConnectedProperty ()
@@ -4267,7 +4309,7 @@ namespace MonoTests.System.Net.Sockets
 
 			Socket listenSocket = new Socket (AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
 			
-			listenSocket.Bind (new IPEndPoint (IPAddress.Loopback, 8001));
+			listenSocket.Bind (new IPEndPoint (IPAddress.Loopback, 0));
 			listenSocket.Listen (1);
 
 			listenSocket.BeginAccept (new AsyncCallback (ReceiveCallback), listenSocket);

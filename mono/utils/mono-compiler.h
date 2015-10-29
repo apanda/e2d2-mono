@@ -180,9 +180,9 @@
 #define MONO_THREAD_VAR_OFFSET(var,offset) (offset) = -1
 #endif
 
-#elif defined(TARGET_MACH) && 0
+#elif !defined(MONO_CROSS_COMPILE) && defined(PLATFORM_MACOSX) && (defined(__i386__) || defined(__x86_64__))
 
-#define MONO_HAVE_FAST_TLS
+#define MONO_HAVE_FAST_TLS 1
 #define MONO_FAST_TLS_SET(x,y) pthread_setspecific(x, y)
 #define MONO_FAST_TLS_GET(x) pthread_getspecific(x)
 #define MONO_FAST_TLS_ADDR(x) (mono_mach_get_tls_address_from_thread (pthread_self (), x))
@@ -195,7 +195,7 @@
 	(void) (&_x == &_y);		\
 	y = (gint32) x; })
 
-#elif (defined(TARGET_ANDROID) || defined(TARGET_IOS)) && defined(TARGET_ARM)
+#elif !defined(MONO_CROSS_COMPILE) && (defined(PLATFORM_ANDROID) || defined(TARGET_IOS)) && defined(TARGET_ARM)
 
 #define MONO_HAVE_FAST_TLS
 #define MONO_FAST_TLS_SET(x,y) pthread_setspecific(x, y)

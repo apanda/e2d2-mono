@@ -101,6 +101,8 @@ monoutils_sources = \
 	mono-threads.c	\
 	mono-threads-state-machine.c	\
 	mono-threads-posix.c	\
+	mono-threads-posix-signals.c	\
+	mono-threads-posix-signals.h	\
 	mono-threads-mach.c	\
 	mono-threads-mach-helper.c	\
 	mono-threads-windows.c	\
@@ -109,8 +111,12 @@ monoutils_sources = \
 	mono-threads-openbsd.c	\
 	mono-threads-android.c	\
 	mono-threads.h	\
+	mono-threads-api.h	\
 	mono-threads-coop.c	\
 	mono-threads-coop.h	\
+	mono-threads-mach-abort-syscall.c	\
+	mono-threads-posix-abort-syscall.c	\
+	mono-threads-windows-abort-syscall.c	\
 	mono-tls.h	\
 	mono-tls.c	\
 	linux_magic.h	\
@@ -139,7 +145,9 @@ monoutils_sources = \
 	memfuncs.c \
 	memfuncs.h \
 	parse.c \
-	parse.h
+	parse.h	\
+	checked-build.c \
+	checked-build.h
 
 arch_sources = 
 
@@ -158,7 +166,7 @@ arch_sources += mach-support-arm.c
 endif
 
 if ARM64
-arch_sources += mach-support-arm.c
+arch_sources += mach-support-arm64.c
 endif
 
 else

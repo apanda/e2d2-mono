@@ -437,6 +437,10 @@ mono_print_ji (const MonoJumpInfo *ji)
 		g_free (s);
 		break;
 	}
+	case MONO_PATCH_INFO_INTERNAL_METHOD: {
+		printf ("[INTERNAL_METHOD - %s]", ji->data.name);
+		break;
+	}
 	default:
 		printf ("[%s]", patch_info_str [ji->type]);
 		break;
@@ -2505,7 +2509,7 @@ mono_opcode_to_type (int opcode, int cmp_opcode)
 gboolean
 mono_is_regsize_var (MonoType *t)
 {
-	t = mini_type_get_underlying_type (NULL, t);
+	t = mini_get_underlying_type (t);
 	switch (t->type) {
 	case MONO_TYPE_I1:
 	case MONO_TYPE_U1:
@@ -2754,9 +2758,6 @@ mini_type_is_hfa (MonoType *t, int *out_nfields, int *out_esize)
 				return FALSE;
 			prev_ftype = ftype;
 			nfields += nested_nfields;
-			// FIXME: Nested float structs are aligned to 8 bytes
-			if (ftype->type == MONO_TYPE_R4)
-				return FALSE;
 		} else {
 			if (!(!ftype->byref && (ftype->type == MONO_TYPE_R4 || ftype->type == MONO_TYPE_R8)))
 				return FALSE;
@@ -2766,7 +2767,7 @@ mini_type_is_hfa (MonoType *t, int *out_nfields, int *out_esize)
 			nfields ++;
 		}
 	}
-	if (nfields == 0 || nfields > 4)
+	if (nfields == 0)
 		return FALSE;
 	*out_nfields = nfields;
 	*out_esize = prev_ftype->type == MONO_TYPE_R4 ? 4 : 8;

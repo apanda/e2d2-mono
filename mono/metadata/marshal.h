@@ -139,6 +139,7 @@ typedef struct {
 	MonoMethod *method;
 	/* For WRAPPER_SUBTYPE_RUNTIME_INVOKE_NORMAL */
 	MonoMethodSignature *sig;
+	gboolean pass_rgctx;
 } RuntimeInvokeWrapperInfo;
 
 typedef struct {
@@ -312,7 +313,7 @@ MonoMethod *
 mono_marshal_get_delegate_invoke_internal (MonoMethod *method, gboolean callvirt, gboolean static_method_with_first_arg_bound, MonoMethod *target_method);
 
 MonoMethod *
-mono_marshal_get_runtime_invoke (MonoMethod *method, gboolean is_virtual);
+mono_marshal_get_runtime_invoke (MonoMethod *method, gboolean is_virtual, gboolean pass_rgctx);
 
 MonoMethod*
 mono_marshal_get_runtime_invoke_dynamic (void);
@@ -395,9 +396,6 @@ mono_marshal_get_gsharedvt_out_wrapper (void);
 
 void
 mono_marshal_free_dynamic_wrappers (MonoMethod *method);
-
-void
-mono_marshal_free_inflated_wrappers (MonoMethod *method);
 
 void
 mono_marshal_lock_internal (void);
@@ -488,10 +486,10 @@ gpointer
 ves_icall_System_Runtime_InteropServices_Marshal_ReAllocCoTaskMem (gpointer ptr, int size);
 
 void*
-ves_icall_System_Runtime_InteropServices_Marshal_AllocHGlobal (int size);
+ves_icall_System_Runtime_InteropServices_Marshal_AllocHGlobal (gpointer size);
 
 gpointer 
-ves_icall_System_Runtime_InteropServices_Marshal_ReAllocHGlobal (gpointer ptr, int size);
+ves_icall_System_Runtime_InteropServices_Marshal_ReAllocHGlobal (gpointer ptr, gpointer size);
 
 void
 ves_icall_System_Runtime_InteropServices_Marshal_FreeHGlobal (void *ptr);

@@ -45,6 +45,7 @@
 #include <mono/utils/mono-counters.h>
 #include <mono/utils/mono-error-internals.h>
 #include <mono/utils/mono-tls.h>
+#include <mono/utils/mono-path.h>
 
 MonoDefaults mono_defaults;
 
@@ -600,8 +601,11 @@ mono_field_from_token_checked (MonoImage *image, guint32 token, MonoClass **retk
 		}
 	}
 
-	if (field && field->parent && !field->parent->generic_class && !field->parent->generic_container)
+	if (field && field->parent && !field->parent->generic_class && !field->parent->generic_container) {
+		mono_image_lock (image);
 		mono_conc_hashtable_insert (image->field_cache, GUINT_TO_POINTER (token), field);
+		mono_image_unlock (image);
+	}
 
 	mono_loader_assert_no_error ();
 	return field;
@@ -1428,7 +1432,7 @@ mono_lookup_pinvoke_call (MonoMethod *method, const char **exc_class, const char
 	const char *new_scope;
 	char *error_msg;
 	char *full_name, *file_name, *found_name = NULL;
-	int i;
+	int i,j;
 	MonoDl *module = NULL;
 	gboolean cached = FALSE;
 
@@ -1576,23 +1580,85 @@ mono_lookup_pinvoke_call (MonoMethod *method, const char **exc_class, const char
 		}
 
 		if (!module && !is_absolute) {
-			void *iter = NULL;
-			char *mdirname = g_path_get_dirname (image->name);
-			while ((full_name = mono_dl_build_path (mdirname, file_name, &iter))) {
-				module = cached_module_load (full_name, MONO_DL_LAZY, &error_msg);
-				if (!module) {
-					mono_trace (G_LOG_LEVEL_INFO, MONO_TRACE_DLLIMPORT,
-						"DllImport error loading library '%s': '%s'.",
-								full_name, error_msg);
-					g_free (error_msg);
-				} else {
-					found_name = g_strdup (full_name);
+			void *iter;
+			char *mdirname;
+
+			for (j = 0; j < 3; ++j) {
+				iter = NULL;
+				mdirname = NULL;
+				switch (j) {
+					case 0:
+						mdirname = g_path_get_dirname (image->name);
+						break;
+					case 1: /* @executable_path@/../lib */
+					{
+						char buf [4096];
+						int binl;
+						binl = mono_dl_get_executable_path (buf, sizeof (buf));
+						if (binl != -1) {
+							char *base, *newbase;
+							char *resolvedname;
+							buf [binl] = 0;
+							resolvedname = mono_path_resolve_symlinks (buf);
+
+							base = g_path_get_dirname (resolvedname);
+							newbase = g_path_get_dirname(base);
+							mdirname = g_strdup_printf ("%s/lib", newbase);
+
+							g_free (resolvedname);
+							g_free (base);
+							g_free (newbase);
+						}
+						break;
+					}
+#ifdef __MACH__
+					case 2: /* @executable_path@/../Libraries */
+					{
+						char buf [4096];
+						int binl;
+						binl = mono_dl_get_executable_path (buf, sizeof (buf));
+						if (binl != -1) {
+							char *base, *newbase;
+							char *resolvedname;
+							buf [binl] = 0;
+							resolvedname = mono_path_resolve_symlinks (buf);
+
+							base = g_path_get_dirname (resolvedname);
+							newbase = g_path_get_dirname(base);
+							mdirname = g_strdup_printf ("%s/Libraries", newbase);
+
+							g_free (resolvedname);
+							g_free (base);
+							g_free (newbase);
+						}
+						break;
+					}
+#endif
 				}
-				g_free (full_name);
+
+				if (!mdirname)
+					continue;
+
+				while ((full_name = mono_dl_build_path (mdirname, file_name, &iter))) {
+					module = cached_module_load (full_name, MONO_DL_LAZY, &error_msg);
+					if (!module) {
+						mono_trace (G_LOG_LEVEL_INFO, MONO_TRACE_DLLIMPORT,
+							"DllImport error loading library '%s': '%s'.",
+									full_name, error_msg);
+						g_free (error_msg);
+					} else {
+						found_name = g_strdup (full_name);
+					}
+					g_free (full_name);
+					if (module)
+						break;
+
+				}
+				g_free (mdirname);
 				if (module)
 					break;
 			}
-			g_free (mdirname);
+
 		}
 
 		if (!module) {
@@ -2376,10 +2442,11 @@ stack_walk_adapter (MonoStackFrameInfo *frame, MonoContext *ctx, gpointer data)
 	switch (frame->type) {
 	case FRAME_TYPE_DEBUGGER_INVOKE:
 	case FRAME_TYPE_MANAGED_TO_NATIVE:
+	case FRAME_TYPE_TRAMPOLINE:
 		return FALSE;
 	case FRAME_TYPE_MANAGED:
 		g_assert (frame->ji);
-		return d->func (mono_jit_info_get_method (frame->ji), frame->native_offset, frame->il_offset, frame->managed, d->user_data);
+		return d->func (frame->actual_method, frame->native_offset, frame->il_offset, frame->managed, d->user_data);
 		break;
 	default:
 		g_assert_not_reached ();
@@ -2415,14 +2482,16 @@ async_stack_walk_adapter (MonoStackFrameInfo *frame, MonoContext *ctx, gpointer 
 	switch (frame->type) {
 	case FRAME_TYPE_DEBUGGER_INVOKE:
 	case FRAME_TYPE_MANAGED_TO_NATIVE:
+	case FRAME_TYPE_TRAMPOLINE:
 		return FALSE;
 	case FRAME_TYPE_MANAGED:
 		if (!frame->ji)
 			return FALSE;
-		if (frame->ji->async)
+		if (frame->ji->async) {
 			return d->func (NULL, frame->domain, frame->ji->code_start, frame->native_offset, d->user_data);
-		else
+		} else {
 			return d->func (frame->actual_method, frame->domain, frame->ji->code_start, frame->native_offset, d->user_data);
+		}
 		break;
 	default:
 		g_assert_not_reached ();
@@ -2474,9 +2543,9 @@ static gboolean loader_lock_track_ownership = FALSE;
 void
 mono_loader_lock (void)
 {
-	MONO_TRY_BLOCKING
+	MONO_TRY_BLOCKING;
 	mono_locks_acquire (&loader_mutex, LoaderLock);
-	MONO_FINISH_TRY_BLOCKING
+	MONO_FINISH_TRY_BLOCKING;
 		
 	if (G_UNLIKELY (loader_lock_track_ownership)) {
 		mono_native_tls_set_value (loader_lock_nest_id, GUINT_TO_POINTER (GPOINTER_TO_UINT (mono_native_tls_get_value (loader_lock_nest_id)) + 1));

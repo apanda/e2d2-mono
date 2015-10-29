@@ -1,8 +1,11 @@
 SUBDIRS = assemblyresolve gc-descriptors
 
-check-local: assemblyresolve/test/asm.dll testjit test-generic-sharing test-type-load test-cattr-type-load test-reflection-load-with-context test_platform test-process-exit test-messages rm-empty-logs
+check-local: assemblyresolve/test/asm.dll testjit test-generic-sharing test-type-load test-cattr-type-load test-reflection-load-with-context test_platform test-process-exit test-messages test-unhandled-exception-2 test-appdomain-unload rm-empty-logs
 check-full: test-sgen check-local
 check-parallel: compile-tests check-full
+
+check-coreclr:
+	$(MAKE) -C $(mono_build_root)/acceptance-tests check-coreclr
 
 # for backwards compatibility on Wrench
 test-wrench: check-parallel
@@ -17,8 +20,6 @@ TEST_PROG_RUN = MONO_CFG_DIR=$(mono_build_root)/runtime/etc $(LIBTOOL) --mode=ex
 JITTEST_PROG_RUN = MONO_CFG_DIR=$(mono_build_root)/runtime/etc $(LIBTOOL) --mode=execute $(JITTEST_PROG)
 
 RUNTIME_ARGS=--config tests-config --optimize=all --debug
-
--include $(mcs_topdir)/build/config.make
 
 CLASS=$(mcs_topdir)/class/lib/$(DEFAULT_PROFILE)
 
@@ -186,6 +187,7 @@ BASE_TEST_CS_SRC=		\
 	delegate9.cs		\
 	delegate10.cs		\
 	delegate11.cs		\
+	delegate12.cs		\
 	remoting1.cs		\
 	remoting2.cs		\
 	remoting3.cs		\
@@ -333,6 +335,7 @@ BASE_TEST_CS_SRC=		\
 	bug-80392.2.cs		\
 	dynamic-method-access.2.cs	\
 	dynamic-method-finalize.2.cs	\
+	dynamic-method-stack-traces.cs	\
 	bug-82194.2.cs	\
 	anonarray.2.cs	\
 	ienumerator-interfaces.2.cs	\
@@ -417,7 +420,12 @@ BASE_TEST_CS_SRC=		\
 	sleep.cs \
 	bug-27147.cs	\
 	bug-30085.cs	\
-	bug-17537.cs
+	bug-17537.cs	\
+	pinvoke_ppcc.cs	\
+	pinvoke_ppcs.cs	\
+	pinvoke_ppci.cs	\
+	pinvoke_ppcf.cs	\
+	pinvoke_ppcd.cs
 
 TEST_CS_SRC_DIST=	\
 	$(BASE_TEST_CS_SRC)	\
@@ -464,8 +472,8 @@ PLATFORM_DISABLED_TESTS=finalizer-abort.exe finalizer-exception.exe finalizer-ex
 endif
 
 if POWERPC64
-# These tests hang
-PLATFORM_DISABLED_TESTS=monitor.exe finalizer-abort.exe finalizer-exception.exe finalizer-exit.exe
+# FIXME: These tests hang/fail for unknown reasons
+PLATFORM_DISABLED_TESTS=monitor.exe threadpool-exceptions5.exe
 endif
 
 if ARM
@@ -606,6 +614,7 @@ TEST_IL_SRC=			\
 	cpblkTest.il		\
 	vbinterface.il		\
 	calliTest.il		\
+	calliGenericTest.il		\
 	ckfiniteTest.il		\
 	fault-handler.il		\
 	locallocTest.il		\
@@ -855,7 +864,11 @@ runtest: $(TESTSI_CS) $(TESTSI_IL) $(TESTBS) libtest.la $(PREREQSI_IL) $(PREREQS
 
 runtest-managed: test-runner.exe $(TESTSI_CS) $(TESTSI_IL) $(TESTBS) libtest.la $(PREREQSI_IL) $(PREREQSI_CS)
 	@if [ "x$$CI" = "x1" ]; then disabled_tests="$(DISABLED_TESTS_WRENCH)"; else disabled_tests="$(DISABLED_TESTS)"; fi; \
-	$(RUNTIME) ./test-runner.exe -j a --disabled "$${disabled_tests}" $(TESTSI_CS) $(TESTBS) $(TESTSI_IL)
+	$(RUNTIME) ./test-runner.exe -j a --testsuite-name "runtime" --disabled "$${disabled_tests}" $(TESTSI_CS) $(TESTBS) $(TESTSI_IL)
+
+runtest-managed-serial: test-runner.exe $(TESTSI_CS) $(TESTSI_IL) $(TESTBS) libtest.la $(PREREQSI_IL) $(PREREQSI_CS)
+	@if [ "x$$CI" = "x1" ]; then disabled_tests="$(DISABLED_TESTS_WRENCH)"; else disabled_tests="$(DISABLED_TESTS)"; fi; \
+	$(RUNTIME) ./test-runner.exe -j 1 --testsuite-name "runtime" --disabled "$${disabled_tests}" $(TESTSI_CS) $(TESTBS) $(TESTSI_IL)
 
 testjit:
 	@if test x$(M) != x0; then $(MAKE) runtest-managed; else $(MAKE) runtest; fi
@@ -949,6 +962,7 @@ SGEN_TESTS =	\
 	sgen-descriptors.exe	\
 	sgen-gshared-vtype.exe	\
 	sgen-domain-unload.exe	\
+	sgen-domain-unload-2.exe	\
 	sgen-weakref-stress.exe	\
 	sgen-cementing-stress.exe	\
 	sgen-case-23400.exe	\
@@ -1298,7 +1312,7 @@ test-generic-sharing-normal: $(GSHARED_TESTS)
 	done
 
 test-generic-sharing-managed: test-runner.exe $(GSHARED_TESTS)
-	@$(RUNTIME) ./test-runner.exe -j a --opt-sets "gshared gshared,shared gshared,-inline gshared,-inline,shared" $(GSHARED_TESTS)
+	@$(RUNTIME) ./test-runner.exe -j a --testsuite-name "gshared" --opt-sets "gshared gshared,shared gshared,-inline gshared,-inline,shared" $(GSHARED_TESTS)
 
 if NACL_CODEGEN
 test-generic-sharing:
@@ -1351,10 +1365,43 @@ test-oom: $(OOM_TESTS)
 		MONO_GC_PARAMS=max-heap-size=16m                                                  $(RUNTIME) $$fn > $$fn.stdout || exit 1;	\
 	done
 
+if HOST_WIN32
+test-unhandled-exception-2:
+else
+test-unhandled-exception-2: test-unhandled-exception-2-1 test-unhandled-exception-2-2 test-unhandled-exception-2-3 test-unhandled-exception-2-4	\
+		 test-unhandled-exception-2-5 test-unhandled-exception-2-6 test-unhandled-exception-2-7 test-unhandled-exception-2-8
+
+test-unhandled-exception-2-1: unhandled-exception-1.exe test-runner.exe
+	@$(RUNTIME) ./test-runner.exe --testsuite-name $@ --expected-exit-code 1 $<
+test-unhandled-exception-2-2: unhandled-exception-2.exe test-runner.exe
+	@$(RUNTIME) ./test-runner.exe --testsuite-name $@ --expected-exit-code 0 $<
+test-unhandled-exception-2-3: unhandled-exception-3.exe test-runner.exe
+	@$(RUNTIME) ./test-runner.exe --testsuite-name $@ --expected-exit-code 255 $<
+test-unhandled-exception-2-4: unhandled-exception-4.exe test-runner.exe
+	@$(RUNTIME) ./test-runner.exe --testsuite-name $@ --expected-exit-code 0 $<
+test-unhandled-exception-2-5: unhandled-exception-5.exe test-runner.exe
+	@$(RUNTIME) ./test-runner.exe --testsuite-name $@ --expected-exit-code 255 $<
+test-unhandled-exception-2-6: unhandled-exception-6.exe test-runner.exe
+	@$(RUNTIME) ./test-runner.exe --testsuite-name $@ --expected-exit-code 0 $<
+test-unhandled-exception-2-7: unhandled-exception-7.exe test-runner.exe
+	@$(RUNTIME) ./test-runner.exe --testsuite-name $@ --expected-exit-code 0 $<
+test-unhandled-exception-2-8: unhandled-exception-8.exe test-runner.exe
+	@$(RUNTIME) ./test-runner.exe --testsuite-name $@ --expected-exit-code 3 $<
+endif
+
+EXTRA_DIST += appdomain-loader.cs appdomain-tester.cs
+test-appdomain-unload: appdomain-loader.exe appdomain-tester.exe
+	$(RUNTIME) -O=gshared appdomain-loader.exe > appdomain-loader.exe.1.stdout || exit 1;
+	$(RUNTIME) appdomain-loader.exe > appdomain-loader.exe.2.stdout || exit 1;
+	MONO_DEBUG_ASSEMBLY_UNLOAD=1 $(RUNTIME) -O=gshared appdomain-loader.exe > appdomain-loader.exe.3.stdout || exit 1;
+	MONO_DEBUG_ASSEMBLY_UNLOAD=1 $(RUNTIME) appdomain-loader.exe > appdomain-loader.exe.4.stdout || exit 1;
+
+coreclr-gcstress:
+	$(MAKE) -C $(mono_build_root)/acceptance-tests coreclr-gcstress
 
 noinst_LTLIBRARIES = libtest.la
 
-AM_CPPFLAGS = $(GLIB_CFLAGS) $(GMODULE_CFLAGS)
+AM_CPPFLAGS = $(GLIB_CFLAGS)
 
 if HOST_WIN32
 # gcc-3.4.4 emits incorrect code when making indirect calls to stdcall functions using a tail call

@@ -346,6 +346,50 @@ mono_type_name_check_byref (MonoType *type, GString *str)
 		g_string_append_c (str, '&');
 }
 
+/**
+ * mono_identifier_escape_type_name_chars:
+ * @str: a destination string
+ * @identifier: an IDENTIFIER in internal form
+ *
+ * Returns: str.
+ *
+ * The displayed form of the identifier is appended to str.
+ *
+ * The displayed form of an identifier has the characters ,+&*[]\
+ * that have special meaning in type names escaped with a preceeding
+ * backslash (\) character.
+ */
+static GString*
+mono_identifier_escape_type_name_chars (GString* str, const char* identifier)
+{
+	if (!identifier)
+		return str;
+
+	size_t n = str->len;
+	// reserve space for common case: there will be no escaped characters.
+	g_string_set_size(str, n + strlen(identifier));
+	g_string_set_size(str, n);
+
+	for (const char* s = identifier; *s != 0 ; s++) {
+		switch (*s) {
+		case ',':
+		case '+':
+		case '&':
+		case '*':
+		case '[':
+		case ']':
+		case '\\':
+			g_string_append_c (str, '\\');
+			g_string_append_c (str, *s);
+			break;
+		default:
+			g_string_append_c (str, *s);
+			break;
+		}
+	}
+	return str;
+}
+
 static void
 mono_type_get_name_recurse (MonoType *type, GString *str, gboolean is_recursed,
 			    MonoTypeNameFormat format)
@@ -427,16 +471,19 @@ mono_type_get_name_recurse (MonoType *type, GString *str, gboolean is_recursed,
 			else
 				g_string_append_c (str, '+');
 		} else if (*klass->name_space) {
-			g_string_append (str, klass->name_space);
+			if (format == MONO_TYPE_NAME_FORMAT_IL)
+				g_string_append (str, klass->name_space);
+			else
+				mono_identifier_escape_type_name_chars (str, klass->name_space);
 			g_string_append_c (str, '.');
 		}
 		if (format == MONO_TYPE_NAME_FORMAT_IL) {
 			char *s = strchr (klass->name, '`');
 			int len = s ? s - klass->name : strlen (klass->name);
-
 			g_string_append_len (str, klass->name, len);
-		} else
-			g_string_append (str, klass->name);
+		} else {
+			mono_identifier_escape_type_name_chars (str, klass->name);
+		}
 		if (is_recursed)
 			break;
 		if (klass->generic_class) {
@@ -632,7 +679,7 @@ inflate_generic_type (MonoImage *image, MonoType *type, MonoGenericContext *cont
 		MonoType *nt;
 		int num = mono_type_get_generic_param_num (type);
 		MonoGenericInst *inst = context->method_inst;
-		if (!inst || !inst->type_argv)
+		if (!inst)
 			return NULL;
 		if (num >= inst->type_argc) {
 			MonoGenericParamInfo *info = mono_generic_param_info (type->data.generic_param);
@@ -1009,7 +1056,6 @@ mono_class_inflate_generic_method_full_checked (MonoMethod *method, MonoClass *k
 	MonoMethodInflated *iresult, *cached;
 	MonoMethodSignature *sig;
 	MonoGenericContext tmp_context;
-	gboolean is_mb_open = FALSE;
 
 	mono_error_init (error);
 
@@ -1041,44 +1087,9 @@ mono_class_inflate_generic_method_full_checked (MonoMethod *method, MonoClass *k
 		(method->klass->generic_container && context->class_inst)))
 		return method;
 
-	/*
-	 * The reason for this hack is to fix the behavior of inflating generic methods that come from a MethodBuilder.
-	 * What happens is that instantiating a generic MethodBuilder with its own arguments should create a diferent object.
-	 * This is opposite to the way non-SRE MethodInfos behave.
-	 * 
-	 * This happens, for example, when we want to emit a recursive generic method. Given the following C# code:
-	 * 
-	 * void Example<T> () {
-	 *    Example<T> ();
-	 * }
-	 *  
-	 * In Example, the method token must be encoded as: "void Example<!!0>()"
-	 * 
-	 * The reference to the first generic argument, "!!0", must be explicit otherwise it won't be inflated
-	 * properly. To get that we need to inflate the MethodBuilder with its own arguments.
-	 * 
-	 * On the other hand, inflating a non-SRE generic method with its own arguments should
-	 * return itself. For example:
-	 * 
-	 * MethodInfo m = ... //m is a generic method definition
-	 * MethodInfo res = m.MakeGenericMethod (m.GetGenericArguments ());
-	 * res == m
-	 *
-	 * To allow such scenarios we must allow inflation of MethodBuilder to happen in a diferent way than
-	 * what happens with regular methods.
-	 * 
-	 * There is one last touch to this madness, once a TypeBuilder is finished, IOW CreateType() is called,
-	 * everything should behave like a regular type or method.
-	 * 
-	 */
-	is_mb_open = method->is_generic &&
-		image_is_dynamic (method->klass->image) && !method->klass->wastypebuilder && /* that is a MethodBuilder from an unfinished TypeBuilder */
-		context->method_inst == mono_method_get_generic_container (method)->context.method_inst; /* and it's been instantiated with its own arguments.  */
-
 	iresult = g_new0 (MonoMethodInflated, 1);
 	iresult->context = *context;
 	iresult->declaring = method;
-	iresult->method.method.is_mb_open = is_mb_open;
 
 	if (!context->method_inst && method->is_generic)
 		iresult->context.method_inst = mono_method_get_generic_container (method)->context.method_inst;
@@ -1094,7 +1105,13 @@ mono_class_inflate_generic_method_full_checked (MonoMethod *method, MonoClass *k
 	if (!iresult->declaring->klass->generic_container && !iresult->declaring->klass->generic_class)
 		iresult->context.class_inst = NULL;
 
-	cached = mono_method_inflated_lookup (iresult, FALSE);
+	MonoImageSet *set = mono_metadata_get_image_set_for_method (iresult);
+
+	// check cache
+	mono_image_set_lock (set);
+	cached = g_hash_table_lookup (set->gmethod_cache, iresult);
+	mono_image_set_unlock (set);
+
 	if (cached) {
 		g_free (iresult);
 		return (MonoMethod*)cached;
@@ -1123,7 +1140,6 @@ mono_class_inflate_generic_method_full_checked (MonoMethod *method, MonoClass *k
 	result->is_generic = FALSE;
 	result->sre_method = FALSE;
 	result->signature = NULL;
-	result->is_mb_open = is_mb_open;
 
 	if (!context->method_inst) {
 		/* Set the generic_container of the result to the generic_container of method */
@@ -1166,7 +1182,17 @@ mono_class_inflate_generic_method_full_checked (MonoMethod *method, MonoClass *k
 	 * is_generic_method_definition().
 	 */
 
-	return (MonoMethod*)mono_method_inflated_lookup (iresult, TRUE);
+	// check cache
+	mono_image_set_lock (set);
+	cached = g_hash_table_lookup (set->gmethod_cache, iresult);
+	if (!cached) {
+		g_hash_table_insert (set->gmethod_cache, iresult, iresult);
+		iresult->owner = set;
+		cached = iresult;
+	}
+	mono_image_set_unlock (set);
+
+	return (MonoMethod*)cached;
 
 fail:
 	g_free (iresult);
@@ -7462,18 +7488,21 @@ mono_image_init_name_cache (MonoImage *image)
 	const char *name;
 	const char *nspace;
 	guint32 i, visib, nspace_index;
-	GHashTable *name_cache2, *nspace_table;
+	GHashTable *name_cache2, *nspace_table, *the_name_cache;
 
-	mono_image_lock (image);
-
-	if (image->name_cache) {
-		mono_image_unlock (image);
+	if (image->name_cache)
 		return;
-	}
 
-	image->name_cache = g_hash_table_new (g_str_hash, g_str_equal);
+	the_name_cache = g_hash_table_new (g_str_hash, g_str_equal);
 
 	if (image_is_dynamic (image)) {
+		mono_image_lock (image);
+		if (image->name_cache) {
+			/* Somebody initialized it before us */
+			g_hash_table_destroy (the_name_cache);
+		} else {
+			mono_atomic_store_release (&image->name_cache, the_name_cache);
+		}
 		mono_image_unlock (image);
 		return;
 	}
@@ -7497,7 +7526,7 @@ mono_image_init_name_cache (MonoImage *image)
 		nspace_table = g_hash_table_lookup (name_cache2, GUINT_TO_POINTER (nspace_index));
 		if (!nspace_table) {
 			nspace_table = g_hash_table_new (g_str_hash, g_str_equal);
-			g_hash_table_insert (image->name_cache, (char*)nspace, nspace_table);
+			g_hash_table_insert (the_name_cache, (char*)nspace, nspace_table);
 			g_hash_table_insert (name_cache2, GUINT_TO_POINTER (nspace_index),
 								 nspace_table);
 		}
@@ -7519,7 +7548,7 @@ mono_image_init_name_cache (MonoImage *image)
 			nspace_table = g_hash_table_lookup (name_cache2, GUINT_TO_POINTER (nspace_index));
 			if (!nspace_table) {
 				nspace_table = g_hash_table_new (g_str_hash, g_str_equal);
-				g_hash_table_insert (image->name_cache, (char*)nspace, nspace_table);
+				g_hash_table_insert (the_name_cache, (char*)nspace, nspace_table);
 				g_hash_table_insert (name_cache2, GUINT_TO_POINTER (nspace_index),
 									 nspace_table);
 			}
@@ -7528,6 +7557,14 @@ mono_image_init_name_cache (MonoImage *image)
 	}
 
 	g_hash_table_destroy (name_cache2);
+
+	mono_image_lock (image);
+	if (image->name_cache) {
+		/* Somebody initialized it before us */
+		g_hash_table_destroy (the_name_cache);
+	} else {
+		mono_atomic_store_release (&image->name_cache, the_name_cache);
+	}
 	mono_image_unlock (image);
 }
 
@@ -7540,10 +7577,8 @@ mono_image_add_to_name_cache (MonoImage *image, const char *nspace,
 	GHashTable *name_cache;
 	guint32 old_index;
 
+	mono_image_init_name_cache (image);
 	mono_image_lock (image);
-
-	if (!image->name_cache)
-		mono_image_init_name_cache (image);
 
 	name_cache = image->name_cache;
 	if (!(nspace_table = g_hash_table_lookup (name_cache, nspace))) {
@@ -7609,10 +7644,8 @@ mono_class_from_name_case_checked (MonoImage *image, const char* name_space, con
 		guint32 token = 0;
 		FindUserData user_data;
 
+		mono_image_init_name_cache (image);
 		mono_image_lock (image);
-
-		if (!image->name_cache)
-			mono_image_init_name_cache (image);
 
 		user_data.key = name_space;
 		user_data.value = NULL;
@@ -7711,7 +7744,7 @@ search_modules (MonoImage *image, const char *name_space, const char *name)
 }
 
 static MonoClass *
-mono_class_from_name_checked_aux (MonoImage *image, const char* name_space, const char *name, MonoError *error, MonoGHashTable* visited_images)
+mono_class_from_name_checked_aux (MonoImage *image, const char* name_space, const char *name, MonoError *error, GHashTable* visited_images)
 {
 	GHashTable *nspace_table;
 	MonoImage *loaded_image;
@@ -7724,10 +7757,10 @@ mono_class_from_name_checked_aux (MonoImage *image, const char* name_space, cons
 	mono_error_init (error);
 
 	// Checking visited images avoids stack overflows when cyclic references exist.
-	if (mono_g_hash_table_lookup (visited_images, image))
+	if (g_hash_table_lookup (visited_images, image))
 		return NULL;
 
-	mono_g_hash_table_insert (visited_images, image, GUINT_TO_POINTER(1));
+	g_hash_table_insert (visited_images, image, GUINT_TO_POINTER(1));
 
 	if ((nested = strchr (name, '/'))) {
 		int pos = nested - name;
@@ -7753,10 +7786,8 @@ mono_class_from_name_checked_aux (MonoImage *image, const char* name_space, cons
 		}
 	}
 
+	mono_image_init_name_cache (image);
 	mono_image_lock (image);
-
-	if (!image->name_cache)
-		mono_image_init_name_cache (image);
 
 	nspace_table = g_hash_table_lookup (image->name_cache, name_space);
 
@@ -7831,13 +7862,13 @@ MonoClass *
 mono_class_from_name_checked (MonoImage *image, const char* name_space, const char *name, MonoError *error)
 {
 	MonoClass *klass;
-	MonoGHashTable *visited_images;
+	GHashTable *visited_images;
 
-	visited_images = mono_g_hash_table_new (g_direct_hash, g_direct_equal);
+	visited_images = g_hash_table_new (g_direct_hash, g_direct_equal);
 
 	klass = mono_class_from_name_checked_aux (image, name_space, name, error, visited_images);
 
-	mono_g_hash_table_destroy (visited_images);
+	g_hash_table_destroy (visited_images);
 
 	return klass;
 }

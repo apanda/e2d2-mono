@@ -68,7 +68,7 @@
 
 #include "jit-icalls.h"
 
-#if defined(__native_client__)
+#if defined(__native_client__) || defined(HOST_WATCHOS)
 
 void
 mono_runtime_setup_stat_profiler (void)
@@ -89,9 +89,17 @@ MONO_SIG_HANDLER_SIGNATURE (mono_chain_signal)
 	return FALSE;
 }
 
+#ifndef PLATFORM_MACOSX
 void
 mono_runtime_install_handlers (void)
 {
+}
+#endif
+
+void
+mono_runtime_posix_install_handlers(void)
+{
+
 }
 
 void
@@ -104,6 +112,7 @@ mono_runtime_cleanup_handlers (void)
 {
 }
 
+#if !defined(PLATFORM_MACOSX)
 pid_t
 mono_runtime_syscall_fork (void)
 {
@@ -115,6 +124,7 @@ void
 mono_gdb_render_native_backtraces (pid_t crashed_pid)
 {
 }
+#endif
 
 #else
 
@@ -201,7 +211,7 @@ MONO_SIG_HANDLER_FUNC (static, sigabrt_signal_handler)
 	MONO_SIG_HANDLER_GET_CONTEXT;
 
 	if (mono_thread_internal_current ())
-		ji = mono_jit_info_table_find (mono_domain_get (), mono_arch_ip_from_context (ctx));
+		ji = mono_jit_info_table_find_internal (mono_domain_get (), mono_arch_ip_from_context (ctx), TRUE, TRUE);
 	if (!ji) {
         if (mono_chain_signal (MONO_SIG_HANDLER_PARAMS))
 			return;
@@ -389,7 +399,7 @@ add_signal_handler (int signo, gpointer handler)
 #ifdef MONO_ARCH_SIGSEGV_ON_ALTSTACK
 
 /*Apple likes to deliver SIGBUS for *0 */
-#ifdef __APPLE__
+#ifdef PLATFORM_MACOSX
 	if (signo == SIGSEGV || signo == SIGBUS) {
 #else
 	if (signo == SIGSEGV) {
@@ -628,7 +638,7 @@ mono_runtime_setup_stat_profiler (void)
 #endif
 }
 
-#if !defined(__APPLE__)
+#if !defined(PLATFORM_MACOSX)
 pid_t
 mono_runtime_syscall_fork ()
 {

@@ -42,7 +42,6 @@
 #include <mono/metadata/metadata-internals.h>
 #include <mono/metadata/marshal.h>
 #include <mono/metadata/gc-internal.h>
-#include <mono/metadata/monitor.h>
 #include <mono/metadata/mempool-internals.h>
 #include <mono/metadata/mono-endian.h>
 #include <mono/metadata/threads-types.h>
@@ -117,6 +116,7 @@ typedef struct MonoAotOptions {
 	gboolean no_instances;
 	gboolean gnu_asm;
 	gboolean llvm;
+	gboolean llvm_only;
 	int nthreads;
 	int ntrampolines;
 	int nrgctx_trampolines;
@@ -127,7 +127,6 @@ typedef struct MonoAotOptions {
 	gboolean stats;
 	char *tool_prefix;
 	char *ld_flags;
-	gboolean autoreg;
 	char *mtriple;
 	char *llvm_path;
 	char *temp_path;
@@ -179,7 +178,7 @@ typedef struct MonoAotCompile {
 	/* Maps MonoMethod* -> blob offset */
 	GHashTable *method_blob_hash;
 	guint32 *plt_got_info_offsets;
-	guint32 got_offset, llvm_got_offset, plt_offset, plt_got_offset_base;
+	guint32 got_offset, llvm_got_offset, plt_offset, plt_got_offset_base, nshared_got_entries;
 	/* Number of GOT entries reserved for trampolines */
 	guint32 num_trampoline_got_entries;
 	guint32 tramp_page_size;
@@ -198,7 +197,6 @@ typedef struct MonoAotCompile {
 	int method_index;
 	char *static_linking_symbol;
 	mono_mutex_t mutex;
-	gboolean use_bin_writer;
 	gboolean gas_line_numbers;
 	/* Whenever to emit an object file directly from llc */
 	gboolean llvm_owriter;
@@ -297,6 +295,9 @@ get_patch_name (int info)
 }
 
 #endif
+
+static guint32
+get_unwind_info_offset (MonoAotCompile *acfg, guint8 *encoded, guint32 encoded_len);
 
 static char*
 get_plt_entry_debug_sym (MonoAotCompile *acfg, MonoJumpInfo *ji, GHashTable *cache);
@@ -852,42 +853,22 @@ arch_emit_direct_call (MonoAotCompile *acfg, const char *target, gboolean extern
 {
 #if defined(TARGET_X86) || defined(TARGET_AMD64)
 	/* Need to make sure this is exactly 5 bytes long */
-	if (!acfg->use_bin_writer) {
-		emit_unset_mode (acfg);
-		fprintf (acfg->fp, "call %s\n", target);
-	} else {
-		emit_byte (acfg, '\xe8');
-		emit_symbol_diff (acfg, target, ".", -4);
-	}
+	emit_unset_mode (acfg);
+	fprintf (acfg->fp, "call %s\n", target);
 	*call_size = 5;
 #elif defined(TARGET_ARM)
-	if (acfg->use_bin_writer) {
-		guint8 buf [4];
-		guint8 *code;
-
-		code = buf;
-		ARM_BL (code, 0);
-
-		mono_img_writer_emit_reloc (acfg->w, R_ARM_CALL, target, -8);
-		emit_bytes (acfg, buf, 4);
-	} else {
-		emit_unset_mode (acfg);
-		if (thumb)
-			fprintf (acfg->fp, "blx %s\n", target);
-		else
-			fprintf (acfg->fp, "bl %s\n", target);
-	}
+	emit_unset_mode (acfg);
+	if (thumb)
+		fprintf (acfg->fp, "blx %s\n", target);
+	else
+		fprintf (acfg->fp, "bl %s\n", target);
 	*call_size = 4;
 #elif defined(TARGET_ARM64)
 	arm64_emit_direct_call (acfg, target, external, thumb, ji, call_size);
 #elif defined(TARGET_POWERPC)
-	if (acfg->use_bin_writer) {
-		g_assert_not_reached ();
-	} else {
-		emit_unset_mode (acfg);
-		fprintf (acfg->fp, "bl %s\n", target);
-		*call_size = 4;
-	}
+	emit_unset_mode (acfg);
+	fprintf (acfg->fp, "bl %s\n", target);
+	*call_size = 4;
 #else
 	g_assert_not_reached ();
 #endif
@@ -937,7 +918,6 @@ static void
 arch_emit_got_offset (MonoAotCompile *acfg, guint8 *code, int *code_size)
 {
 #if defined(TARGET_POWERPC64)
-	g_assert (!acfg->use_bin_writer);
 	emit_unset_mode (acfg);
 	/* 
 	 * The ppc32 code doesn't seem to work on ppc64, the assembler complains about
@@ -952,7 +932,6 @@ arch_emit_got_offset (MonoAotCompile *acfg, guint8 *code, int *code_size)
 	acfg->label_generator ++;
 	*code_size = 16;
 #elif defined(TARGET_POWERPC)
-	g_assert (!acfg->use_bin_writer);
 	emit_unset_mode (acfg);
 	fprintf (acfg->fp, ".L%d:\n", acfg->label_generator);
 	fprintf (acfg->fp, "lis 0, (%s + 4 - .L%d)@h\n", acfg->got_symbol, acfg->label_generator);
@@ -1096,14 +1075,8 @@ arch_emit_plt_entry (MonoAotCompile *acfg, const char *got_symbol, int offset, i
 #endif /*__native_client_codegen__*/
 #elif defined(TARGET_AMD64)
 #if defined(__default_codegen__)
-		if (acfg->use_bin_writer) {
-			emit_byte (acfg, '\xff');
-			emit_byte (acfg, '\x25');
-			emit_symbol_diff (acfg, got_symbol, ".", offset - 4);
-		} else {
-			emit_unset_mode (acfg);
-			fprintf (acfg->fp, "jmp *%s+%d(%%rip)\n", got_symbol, offset);
-		}
+		emit_unset_mode (acfg);
+		fprintf (acfg->fp, "jmp *%s+%d(%%rip)\n", got_symbol, offset);
 		/* Used by mono_aot_get_plt_info_offset */
 		emit_int32 (acfg, info_offset);
 		acfg->stats.plt_size += 10;
@@ -1143,7 +1116,6 @@ arch_emit_plt_entry (MonoAotCompile *acfg, const char *got_symbol, int offset, i
 		arm64_emit_plt_entry (acfg, got_symbol, offset, info_offset);
 #elif defined(TARGET_POWERPC)
 		/* The GOT address is guaranteed to be in r30 by OP_LOAD_GOTADDR */
-		g_assert (!acfg->use_bin_writer);
 		emit_unset_mode (acfg);
 		fprintf (acfg->fp, "lis 11, %d@h\n", offset);
 		fprintf (acfg->fp, "ori 11, 11, %d@l\n", offset);
@@ -1196,6 +1168,22 @@ arch_emit_llvm_plt_entry (MonoAotCompile *acfg, const char *got_symbol, int offs
 #endif
 }
 
+/* Save unwind_info in the module and emit the offset to the information at symbol */
+static void save_unwind_info (MonoAotCompile *acfg, char *symbol, GSList *unwind_ops)
+{
+	guint32 uw_offset, encoded_len;
+	guint8 *encoded;
+
+	emit_section_change (acfg, RODATA_SECT, 0);
+	emit_global (acfg, symbol, FALSE);
+	emit_label (acfg, symbol);
+
+	encoded = mono_unwind_ops_encode (unwind_ops, &encoded_len);
+	uw_offset = get_unwind_info_offset (acfg, encoded, encoded_len);
+	g_free (encoded);
+	emit_int32 (acfg, uw_offset);
+}
+
 /*
  * arch_emit_specific_trampoline_pages:
  *
@@ -1219,6 +1207,7 @@ arch_emit_specific_trampoline_pages (MonoAotCompile *acfg)
 	guint8 *loop_start, *loop_branch_back, *loop_end_check, *imt_found_check;
 	int i;
 	int pagesize = MONO_AOT_TRAMP_PAGE_SIZE;
+	GSList *unwind_ops = NULL;
 #define COMMON_TRAMP_SIZE 16
 	int count = (pagesize - COMMON_TRAMP_SIZE) / 8;
 	int imm8, rot_amount;
@@ -1311,7 +1300,6 @@ arch_emit_specific_trampoline_pages (MonoAotCompile *acfg)
 	/* now the imt trampolines: each specific trampolines puts in the ip register
 	 * the instruction pointer address, so the generic trampoline at the start of the page
 	 * subtracts 4096 to get to the data page and loads the values
-	 * We again fit the generic trampiline in 16 bytes.
 	 */
 #define IMT_TRAMP_SIZE 72
 	sprintf (symbol, "%simt_trampolines_page", acfg->user_symbol_prefix);
@@ -1377,6 +1365,53 @@ arch_emit_specific_trampoline_pages (MonoAotCompile *acfg)
 	acfg->tramp_page_code_offsets [MONO_AOT_TRAMP_STATIC_RGCTX] = 16;
 	acfg->tramp_page_code_offsets [MONO_AOT_TRAMP_IMT_THUNK] = 72;
 	acfg->tramp_page_code_offsets [MONO_AOT_TRAMP_GSHAREDVT_ARG] = 16;
+
+	/* Unwind info for specifc trampolines */
+	sprintf (symbol, "%sspecific_trampolines_page_gen_p", acfg->user_symbol_prefix);
+	/* We unwind to the original caller, from the stack, since lr is clobbered */
+	mono_add_unwind_op_def_cfa (unwind_ops, 0, 0, ARMREG_SP, 14 * sizeof (mgreg_t));
+	mono_add_unwind_op_offset (unwind_ops, 0, 0, ARMREG_LR, -4);
+	save_unwind_info (acfg, symbol, unwind_ops);
+	mono_free_unwind_info (unwind_ops);
+
+	sprintf (symbol, "%sspecific_trampolines_page_sp_p", acfg->user_symbol_prefix);
+	mono_add_unwind_op_def_cfa (unwind_ops, 0, 0, ARMREG_SP, 0);
+	mono_add_unwind_op_def_cfa_offset (unwind_ops, 4, 0, 14 * sizeof (mgreg_t));
+	save_unwind_info (acfg, symbol, unwind_ops);
+	mono_free_unwind_info (unwind_ops);
+
+	/* Unwind info for rgctx trampolines */
+	sprintf (symbol, "%srgctx_trampolines_page_gen_p", acfg->user_symbol_prefix);
+	mono_add_unwind_op_def_cfa (unwind_ops, 0, 0, ARMREG_SP, 0);
+	save_unwind_info (acfg, symbol, unwind_ops);
+
+	sprintf (symbol, "%srgctx_trampolines_page_sp_p", acfg->user_symbol_prefix);
+	save_unwind_info (acfg, symbol, unwind_ops);
+	mono_free_unwind_info (unwind_ops);
+
+	/* Unwind info for gsharedvt trampolines */
+	sprintf (symbol, "%sgsharedvt_trampolines_page_gen_p", acfg->user_symbol_prefix);
+	mono_add_unwind_op_def_cfa (unwind_ops, 0, 0, ARMREG_SP, 0);
+	mono_add_unwind_op_def_cfa_offset (unwind_ops, 4, 0, 4 * sizeof (mgreg_t));
+	save_unwind_info (acfg, symbol, unwind_ops);
+	mono_free_unwind_info (unwind_ops);
+
+	sprintf (symbol, "%sgsharedvt_trampolines_page_sp_p", acfg->user_symbol_prefix);
+	mono_add_unwind_op_def_cfa (unwind_ops, 0, 0, ARMREG_SP, 0);
+	save_unwind_info (acfg, symbol, unwind_ops);
+	mono_free_unwind_info (unwind_ops);
+
+	/* Unwind info for imt trampolines */
+	sprintf (symbol, "%simt_trampolines_page_gen_p", acfg->user_symbol_prefix);
+	mono_add_unwind_op_def_cfa (unwind_ops, 0, 0, ARMREG_SP, 0);
+	mono_add_unwind_op_def_cfa_offset (unwind_ops, 4, 0, 3 * sizeof (mgreg_t));
+	save_unwind_info (acfg, symbol, unwind_ops);
+	mono_free_unwind_info (unwind_ops);
+
+	sprintf (symbol, "%simt_trampolines_page_sp_p", acfg->user_symbol_prefix);
+	mono_add_unwind_op_def_cfa (unwind_ops, 0, 0, ARMREG_SP, 0);
+	save_unwind_info (acfg, symbol, unwind_ops);
+	mono_free_unwind_info (unwind_ops);
 #elif defined(TARGET_ARM64)
 	arm64_emit_specific_trampoline_pages (acfg);
 #endif
@@ -1506,8 +1541,6 @@ arch_emit_specific_trampoline (MonoAotCompile *acfg, int offset, int *tramp_size
 	*tramp_size = 4;
 	code = buf;
 
-	g_assert (!acfg->use_bin_writer);
-
 	/*
 	 * PPC has no ip relative addressing, so we need to compute the address
 	 * of the mscorlib got. That is slow and complex, so instead, we store it
@@ -1545,14 +1578,6 @@ arch_emit_specific_trampoline (MonoAotCompile *acfg, int offset, int *tramp_size
 	/* Similar to the PPC code above */
 
 	/* FIXME: Could this clobber the register needed by get_vcall_slot () ? */
-
-	/* We clobber ECX, since EAX is used as MONO_ARCH_MONITOR_OBJECT_REG */
-#ifdef MONO_ARCH_MONITOR_OBJECT_REG
-	g_assert (MONO_ARCH_MONITOR_OBJECT_REG != X86_ECX);
-#ifdef MONO_ARCH_MONITOR_LOCK_TAKEN_REG
-	g_assert (MONO_ARCH_MONITOR_LOCK_TAKEN_REG != X86_ECX);
-#endif
-#endif
 
 	code = buf;
 	/* Load mscorlib got address */
@@ -1639,27 +1664,14 @@ arch_emit_unbox_trampoline (MonoAotCompile *acfg, MonoCompile *cfg, MonoMethod *
 
 	emit_bytes (acfg, buf, code - buf);
 	/* jump to method */
-	if (acfg->use_bin_writer) {
-		guint8 buf [4];
-		guint8 *code;
-
-		code = buf;
-		ARM_B (code, 0);
-
-		mono_img_writer_emit_reloc (acfg->w, R_ARM_JUMP24, call_target, -8);
-		emit_bytes (acfg, buf, 4);
-	} else {
-		if (acfg->thumb_mixed && cfg->compile_llvm)
-			fprintf (acfg->fp, "\n\tbx %s\n", call_target);
-		else
-			fprintf (acfg->fp, "\n\tb %s\n", call_target);
-	}
+	if (acfg->thumb_mixed && cfg->compile_llvm)
+		fprintf (acfg->fp, "\n\tbx %s\n", call_target);
+	else
+		fprintf (acfg->fp, "\n\tb %s\n", call_target);
 #elif defined(TARGET_ARM64)
 	arm64_emit_unbox_trampoline (acfg, cfg, method, call_target);
 #elif defined(TARGET_POWERPC)
 	int this_pos = 3;
-
-	g_assert (!acfg->use_bin_writer);
 
 	fprintf (acfg->fp, "\n\taddi %d, %d, %d\n", this_pos, this_pos, (int)sizeof (MonoObject));
 	fprintf (acfg->fp, "\n\tb %s\n", call_target);
@@ -1755,8 +1767,6 @@ arch_emit_static_rgctx_trampoline (MonoAotCompile *acfg, int offset, int *tramp_
 
 	*tramp_size = 4;
 	code = buf;
-
-	g_assert (!acfg->use_bin_writer);
 
 	/*
 	 * PPC has no ip relative addressing, so we need to compute the address
@@ -2183,73 +2193,6 @@ arch_emit_gsharedvt_arg_trampoline (MonoAotCompile *acfg, int offset, int *tramp
 #endif
 }	
 
-static void
-arch_emit_autoreg (MonoAotCompile *acfg, char *symbol)
-{
-#if defined(TARGET_POWERPC) && defined(__mono_ilp32__)
-	/* Based on code generated by gcc */
-	emit_unset_mode (acfg);
-
-	fprintf (acfg->fp,
-#if defined(_MSC_VER) || defined(MONO_CROSS_COMPILE) 
-			 ".section	.ctors,\"aw\",@progbits\n"
-			 ".align 2\n"
-			 ".globl	%s\n"
-			 ".long	%s\n"
-			 ".section	.opd,\"aw\"\n"
-			 ".align 2\n"
-			 "%s:\n"
-			 ".long	.%s,.TOC.@tocbase32\n"
-			 ".size	%s,.-%s\n"
-			 ".section .text\n"
-			 ".type	.%s,@function\n"
-			 ".align 2\n"
-			 ".%s:\n", symbol, symbol, symbol, symbol, symbol, symbol, symbol, symbol);
-#else
-			 ".section	.ctors,\"aw\",@progbits\n"
-			 ".align 2\n"
-			 ".globl	%1$s\n"
-			 ".long	%1$s\n"
-			 ".section	.opd,\"aw\"\n"
-			 ".align 2\n"
-			 "%1$s:\n"
-			 ".long	.%1$s,.TOC.@tocbase32\n"
-			 ".size	%1$s,.-%1$s\n"
-			 ".section .text\n"
-			 ".type	.%1$s,@function\n"
-			 ".align 2\n"
-			 ".%1$s:\n", symbol);
-#endif
-
-
-	fprintf (acfg->fp,
-			 "stdu 1,-128(1)\n"
-			 "mflr 0\n"
-			 "std 31,120(1)\n"
-			 "std 0,144(1)\n"
-
-			 ".Lautoreg:\n"
-			 "lis 3, .Lglobals@h\n"
-			 "ori 3, 3, .Lglobals@l\n"
-			 "bl .mono_aot_register_module\n"
-			 "ld 11,0(1)\n"
-			 "ld 0,16(11)\n"
-			 "mtlr 0\n"
-			 "ld 31,-8(11)\n"
-			 "mr 1,11\n"
-			 "blr\n"
-			 );
-#if defined(_MSC_VER) || defined(MONO_CROSS_COMPILE) 
-		fprintf (acfg->fp,
-			 ".size	.%s,.-.%s\n", symbol, symbol);
-#else
-	fprintf (acfg->fp,
-			 ".size	.%1$s,.-.%1$s\n", symbol);
-#endif
-#else
-#endif
-}
-
 /* END OF ARCH SPECIFIC CODE */
 
 static guint32
@@ -2575,20 +2518,9 @@ encode_klass_ref_inner (MonoAotCompile *acfg, MonoClass *klass, guint8 *buf, gui
 		} else {
 			encode_value (par->gshared_constraint ? 1 : 0, p, &p);
 			if (par->gshared_constraint) {
-				const char *name;
-
+				MonoGSharedGenericParam *gpar = (MonoGSharedGenericParam*)par;
 				encode_type (acfg, par->gshared_constraint, p, &p);
-
-				name = mono_generic_param_name (par);
-				if (name) {
-					int len = strlen (name);
-
-					encode_value (len, p, &p);
-					memcpy (p, name, len);
-					p += len;
-				} else {
-					encode_value (0, p, &p);
-				}
+				encode_klass_ref (acfg, mono_class_from_generic_parameter (gpar->parent, NULL, klass->byval_arg.type == MONO_TYPE_MVAR), p, &p);
 			}
 		}
 	} else if (klass->byval_arg.type == MONO_TYPE_PTR) {
@@ -2965,6 +2897,7 @@ encode_method_ref (MonoAotCompile *acfg, MonoMethod *method, guint8 *buf, guint8
 
 			g_assert (info);
 			encode_value (info->subtype, p, &p);
+			encode_value (info->d.runtime_invoke.pass_rgctx, p, &p);
 			if (info->subtype == WRAPPER_SUBTYPE_RUNTIME_INVOKE_DIRECT || info->subtype == WRAPPER_SUBTYPE_RUNTIME_INVOKE_VIRTUAL)
 				encode_method_ref (acfg, info->d.runtime_invoke.method, p, &p);
 			else if (info->subtype == WRAPPER_SUBTYPE_RUNTIME_INVOKE_NORMAL)
@@ -3137,11 +3070,7 @@ is_plt_patch (MonoJumpInfo *patch_info)
 	case MONO_PATCH_INFO_INTERNAL_METHOD:
 	case MONO_PATCH_INFO_JIT_ICALL_ADDR:
 	case MONO_PATCH_INFO_ICALL_ADDR:
-	case MONO_PATCH_INFO_CLASS_INIT:
 	case MONO_PATCH_INFO_RGCTX_FETCH:
-	case MONO_PATCH_INFO_MONITOR_ENTER:
-	case MONO_PATCH_INFO_MONITOR_ENTER_V4:
-	case MONO_PATCH_INFO_MONITOR_EXIT:
 	case MONO_PATCH_INFO_LLVM_IMT_TRAMPOLINE:
 		return TRUE;
 	default:
@@ -3363,7 +3292,7 @@ add_jit_icall_wrapper (gpointer key, gpointer value, gpointer user_data)
 		return;
 
 	name = g_strdup_printf ("__icall_wrapper_%s", callinfo->name);
-	wrapper = mono_marshal_get_icall_wrapper (callinfo->sig, name, callinfo->func, check_for_pending_exc);
+	wrapper = mono_marshal_get_icall_wrapper (callinfo->sig, name, callinfo->func, TRUE);
 	g_free (name);
 
 	add_method (acfg, wrapper);
@@ -3377,7 +3306,13 @@ get_runtime_invoke_sig (MonoMethodSignature *sig)
 
 	mb = mono_mb_new (mono_defaults.object_class, "FOO", MONO_WRAPPER_NONE);
 	m = mono_mb_create_method (mb, sig, 16);
-	return mono_marshal_get_runtime_invoke (m, FALSE);
+	return mono_marshal_get_runtime_invoke (m, FALSE, FALSE);
+}
+
+static MonoMethod*
+get_runtime_invoke (MonoAotCompile *acfg, MonoMethod *method, gboolean virtual)
+{
+	return mono_marshal_get_runtime_invoke (method, virtual, acfg->aot_opts.llvm_only && mono_method_needs_static_rgctx_invoke (method, TRUE));
 }
 
 static gboolean
@@ -3556,7 +3491,7 @@ add_wrappers (MonoAotCompile *acfg)
 					has_nullable = TRUE;
 			}
 
-			if (info && !has_nullable) {
+			if (info && !has_nullable && !acfg->aot_opts.llvm_only) {
 				/* Supported by the dynamic runtime-invoke wrapper */
 				skip = TRUE;
 			}
@@ -3567,7 +3502,7 @@ add_wrappers (MonoAotCompile *acfg)
 
 		if (!skip) {
 			//printf ("%s\n", mono_method_full_name (method, TRUE));
-			add_method (acfg, mono_marshal_get_runtime_invoke (method, FALSE));
+			add_method (acfg, get_runtime_invoke (acfg, method, FALSE));
 		}
  	}
 
@@ -3626,15 +3561,16 @@ add_wrappers (MonoAotCompile *acfg)
 		add_method (acfg, get_runtime_invoke_sig (csig));
 
 		/* runtime-invoke used by finalizers */
-		add_method (acfg, mono_marshal_get_runtime_invoke (mono_class_get_method_from_name_flags (mono_defaults.object_class, "Finalize", 0, 0), TRUE));
+		add_method (acfg, get_runtime_invoke (acfg, mono_class_get_method_from_name_flags (mono_defaults.object_class, "Finalize", 0, 0), TRUE));
 
 		/* This is used by mono_runtime_capture_context () */
 		method = mono_get_context_capture_method ();
 		if (method)
-			add_method (acfg, mono_marshal_get_runtime_invoke (method, FALSE));
+			add_method (acfg, get_runtime_invoke (acfg, method, FALSE));
 
 #ifdef MONO_ARCH_DYN_CALL_SUPPORTED
-		add_method (acfg, mono_marshal_get_runtime_invoke_dynamic ());
+		if (!acfg->aot_opts.llvm_only)
+			add_method (acfg, mono_marshal_get_runtime_invoke_dynamic ());
 #endif
 
 		/* stelemref */
@@ -3830,13 +3766,13 @@ add_wrappers (MonoAotCompile *acfg)
 			g_assert (m);
 			wrapper = mono_marshal_get_array_accessor_wrapper (m);
 			add_extra_method (acfg, wrapper);
-			add_extra_method (acfg, mono_marshal_get_runtime_invoke (wrapper, FALSE));
+			add_extra_method (acfg, get_runtime_invoke (acfg, wrapper, FALSE));
 
 			m = mono_class_get_method_from_name (klass, "Set", -1);
 			g_assert (m);
 			wrapper = mono_marshal_get_array_accessor_wrapper (m);
 			add_extra_method (acfg, wrapper);
-			add_extra_method (acfg, mono_marshal_get_runtime_invoke (wrapper, FALSE));
+			add_extra_method (acfg, get_runtime_invoke (acfg, wrapper, FALSE));
 		}
 	}
 
@@ -5273,6 +5209,9 @@ encode_patch (MonoAotCompile *acfg, MonoJumpInfo *patch_info, guint8 *buf, guint
 	case MONO_PATCH_INFO_METHOD_CODE_SLOT:
 		encode_method_ref (acfg, patch_info->data.method, p, &p);
 		break;
+	case MONO_PATCH_INFO_AOT_JIT_INFO:
+		encode_value (patch_info->data.index, p, &p);
+		break;
 	case MONO_PATCH_INFO_INTERNAL_METHOD:
 	case MONO_PATCH_INFO_JIT_ICALL_ADDR: {
 		guint32 len = strlen (patch_info->data.name);
@@ -5323,7 +5262,6 @@ encode_patch (MonoAotCompile *acfg, MonoJumpInfo *patch_info, guint8 *buf, guint
 	case MONO_PATCH_INFO_CLASS:
 	case MONO_PATCH_INFO_IID:
 	case MONO_PATCH_INFO_ADJUSTED_IID:
-	case MONO_PATCH_INFO_CLASS_INIT:
 		encode_klass_ref (acfg, patch_info->data.klass, p, &p);
 		break;
 	case MONO_PATCH_INFO_DELEGATE_TRAMPOLINE:
@@ -5334,7 +5272,7 @@ encode_patch (MonoAotCompile *acfg, MonoJumpInfo *patch_info, guint8 *buf, guint
 		} else {
 			encode_value (0, p, &p);
 		}
-		encode_value (patch_info->data.del_tramp->virtual, p, &p);
+		encode_value (patch_info->data.del_tramp->is_virtual, p, &p);
 		break;
 	case MONO_PATCH_INFO_FIELD:
 	case MONO_PATCH_INFO_SFLDA:
@@ -5342,7 +5280,8 @@ encode_patch (MonoAotCompile *acfg, MonoJumpInfo *patch_info, guint8 *buf, guint
 		break;
 	case MONO_PATCH_INFO_INTERRUPTION_REQUEST_FLAG:
 		break;
-	case MONO_PATCH_INFO_RGCTX_FETCH: {
+	case MONO_PATCH_INFO_RGCTX_FETCH:
+	case MONO_PATCH_INFO_RGCTX_SLOT_INDEX: {
 		MonoJumpInfoRgctxEntry *entry = patch_info->data.rgctx_entry;
 		guint32 offset;
 		guint8 *buf2, *p2;
@@ -5374,10 +5313,8 @@ encode_patch (MonoAotCompile *acfg, MonoJumpInfo *patch_info, guint8 *buf, guint
 		encode_patch (acfg, entry->data, p, &p);
 		break;
 	}
-	case MONO_PATCH_INFO_MONITOR_ENTER:
-	case MONO_PATCH_INFO_MONITOR_ENTER_V4:
-	case MONO_PATCH_INFO_MONITOR_EXIT:
 	case MONO_PATCH_INFO_SEQ_POINT_INFO:
+	case MONO_PATCH_INFO_AOT_MODULE:
 		break;
 	case MONO_PATCH_INFO_LLVM_IMT_TRAMPOLINE:
 		encode_method_ref (acfg, patch_info->data.imt_tramp->method, p, &p);
@@ -5519,13 +5456,14 @@ emit_method_info (MonoAotCompile *acfg, MonoCompile *cfg)
 		}
 
 		if (patch_info->type == MONO_PATCH_INFO_GC_CARD_TABLE_ADDR ||
-				patch_info->type == MONO_PATCH_INFO_GC_NURSERY_START) {
+			patch_info->type == MONO_PATCH_INFO_GC_NURSERY_START ||
+			patch_info->type == MONO_PATCH_INFO_AOT_MODULE) {
 			/* Stored in a GOT slot initialized at module load time */
 			patch_info->type = MONO_PATCH_INFO_NONE;
 			continue;
 		}
 
-		if (is_plt_patch (patch_info)) {
+		if (is_plt_patch (patch_info) && !(cfg->compile_llvm && acfg->aot_opts.llvm_only)) {
 			/* Calls are made through the PLT */
 			patch_info->type = MONO_PATCH_INFO_NONE;
 			continue;
@@ -5667,6 +5605,12 @@ emit_exception_debug_info (MonoAotCompile *acfg, MonoCompile *cfg, gboolean stor
 			} else {
 				encode_value (0, p, &p);
 			}
+
+			/* Emit the IL ranges too, since they might not be available at runtime */
+			encode_value (clause->try_offset, p, &p);
+			encode_value (clause->try_len, p, &p);
+			encode_value (clause->handler_offset, p, &p);
+			encode_value (clause->handler_len, p, &p);
 
 			/* Emit a list of nesting clauses */
 			for (i = 0; i < header->num_clauses; ++i) {
@@ -5918,7 +5862,6 @@ static char*
 get_plt_entry_debug_sym (MonoAotCompile *acfg, MonoJumpInfo *ji, GHashTable *cache)
 {
 	char *debug_sym = NULL;
-	char *s;
 	char *prefix;
 
 	if (acfg->llvm && llvm_acfg->aot_opts.static_link) {
@@ -5934,11 +5877,6 @@ get_plt_entry_debug_sym (MonoAotCompile *acfg, MonoJumpInfo *ji, GHashTable *cac
 		break;
 	case MONO_PATCH_INFO_INTERNAL_METHOD:
 		debug_sym = g_strdup_printf ("%s_jit_icall_%s", prefix, ji->data.name);
-		break;
-	case MONO_PATCH_INFO_CLASS_INIT:
-		s = mono_type_get_name (&ji->data.klass->byval_arg);
-		debug_sym = g_strdup_printf ("%s__class_init_%s", prefix, s);
-		g_free (s);
 		break;
 	case MONO_PATCH_INFO_RGCTX_FETCH:
 		debug_sym = g_strdup_printf ("%s_rgctx_fetch_%d", prefix, acfg->label_generator ++);
@@ -5970,15 +5908,18 @@ get_plt_entry_debug_sym (MonoAotCompile *acfg, MonoJumpInfo *ji, GHashTable *cac
 static void
 emit_plt (MonoAotCompile *acfg)
 {
-	char symbol [128];
 	int i;
 
+	if (acfg->aot_opts.llvm_only) {
+		g_assert (acfg->plt_offset == 1);
+		return;
+	}
+
 	emit_line (acfg);
-	sprintf (symbol, "plt");
 
 	emit_section_change (acfg, ".text", 0);
 	emit_alignment_code (acfg, NACL_SIZE(16, kNaClAlignment));
-	emit_info_symbol (acfg, symbol);
+	emit_info_symbol (acfg, "plt");
 	emit_label (acfg, acfg->plt_symbol);
 
 	for (i = 0; i < acfg->plt_offset; ++i) {
@@ -6082,8 +6023,7 @@ emit_plt (MonoAotCompile *acfg)
 
 	emit_symbol_size (acfg, acfg->plt_symbol, ".");
 
-	sprintf (symbol, "plt_end");
-	emit_info_symbol (acfg, symbol);
+	emit_info_symbol (acfg, "plt_end");
 }
 
 /*
@@ -6202,7 +6142,7 @@ emit_trampoline_full (MonoAotCompile *acfg, int got_offset, MonoTrampInfo *info,
 static G_GNUC_UNUSED void
 emit_trampoline (MonoAotCompile *acfg, int got_offset, MonoTrampInfo *info)
 {
-	emit_trampoline_full (acfg, got_offset, info, FALSE);
+	emit_trampoline_full (acfg, got_offset, info, TRUE);
 }
 
 static void
@@ -6216,7 +6156,7 @@ emit_trampolines (MonoAotCompile *acfg)
 	int tramp_type;
 #endif
 
-	if (!mono_aot_mode_is_full (&acfg->aot_opts))
+	if (!mono_aot_mode_is_full (&acfg->aot_opts) || acfg->aot_opts.llvm_only)
 		return;
 	
 	g_assert (acfg->image->assembly);
@@ -6246,17 +6186,6 @@ emit_trampolines (MonoAotCompile *acfg)
 			mono_arch_create_generic_trampoline (tramp_type, &info, acfg->aot_opts.use_trampolines_page? 2: TRUE);
 			emit_trampoline (acfg, acfg->got_offset, info);
 		}
-
-#if defined(MONO_ARCH_MONITOR_OBJECT_REG)
-		mono_arch_create_monitor_enter_trampoline (&info, FALSE, TRUE);
-		emit_trampoline (acfg, acfg->got_offset, info);
-#if defined(MONO_ARCH_MONITOR_LOCK_TAKEN_REG)
-		mono_arch_create_monitor_enter_trampoline (&info, TRUE, TRUE);
-		emit_trampoline (acfg, acfg->got_offset, info);
-#endif
-		mono_arch_create_monitor_exit_trampoline (&info, TRUE);
-		emit_trampoline (acfg, acfg->got_offset, info);
-#endif
 
 		/* Emit the exception related code pieces */
 		mono_arch_get_restore_context (&info, TRUE);
@@ -6541,14 +6470,87 @@ clean_path (gchar * path)
 	return clean;
 }
 
+static GPtrArray *
+mono_aot_split_options (const char *aot_options)
+{
+	enum MonoAotOptionState {
+		MONO_AOT_OPTION_STATE_DEFAULT,
+		MONO_AOT_OPTION_STATE_STRING,
+		MONO_AOT_OPTION_STATE_ESCAPE,
+	};
+
+	GPtrArray *args = g_ptr_array_new ();
+	enum MonoAotOptionState state = MONO_AOT_OPTION_STATE_DEFAULT;
+	gchar const *opt_start = aot_options;
+	gboolean end_of_string = FALSE;
+	gchar cur;
+
+	g_return_val_if_fail (aot_options != NULL, NULL);
+
+	while ((cur = *aot_options) != '\0') {
+		if (state == MONO_AOT_OPTION_STATE_ESCAPE)
+			goto next;
+
+		switch (cur) {
+		case '"':
+			// If we find a quote, then if we're in the default case then
+			// it means we've found the start of a string, if not then it
+			// means we've found the end of the string and should switch
+			// back to the default case.		
+			switch (state) {
+			case MONO_AOT_OPTION_STATE_DEFAULT:
+				state = MONO_AOT_OPTION_STATE_STRING;
+				break;
+			case MONO_AOT_OPTION_STATE_STRING:
+				state = MONO_AOT_OPTION_STATE_DEFAULT;
+				break;
+			case MONO_AOT_OPTION_STATE_ESCAPE:
+				g_assert_not_reached ();
+				break;
+			}
+			break;
+		case '\\':
+			// If we've found an escaping operator, then this means we
+			// should not process the next character if inside a string.		
+			if (state == MONO_AOT_OPTION_STATE_STRING) 
+				state = MONO_AOT_OPTION_STATE_ESCAPE;
+			break;
+		case ',':
+			// If we're in the default state then this means we've found
+			// an option, store it for later processing.
+			if (state == MONO_AOT_OPTION_STATE_DEFAULT)
+				goto new_opt;
+			break;
+		}
+
+	next:
+		aot_options++;
+		// If the next character is end of string, then process the last option.
+		if (*(aot_options) == '\0') {
+			end_of_string = TRUE;
+			goto new_opt;
+		}
+		continue;
+
+	new_opt:
+		g_ptr_array_add (args, g_strndup (opt_start, aot_options - opt_start));
+		opt_start = ++aot_options;
+		if (end_of_string)
+			break;
+		goto next;
+	}
+
+	return args;
+}
+
 static void
 mono_aot_parse_options (const char *aot_options, MonoAotOptions *opts)
 {
-	gchar **args, **ptr;
+	GPtrArray* args;
 
-	args = g_strsplit (aot_options ? aot_options : "", ",", -1);
-	for (ptr = args; ptr && *ptr; ptr ++) {
-		const char *arg = *ptr;
+	args = mono_aot_split_options (aot_options ? aot_options : "");
+	for (int i = 0; i < args->len; ++i) {
+		const char *arg = g_ptr_array_index (args, i);
 
 		if (str_begins_with (arg, "outfile=")) {
 			opts->outfile = g_strdup (arg + strlen ("outfile="));
@@ -6595,8 +6597,6 @@ mono_aot_parse_options (const char *aot_options, MonoAotOptions *opts)
 			opts->nimt_trampolines = atoi (arg + strlen ("nimt-trampolines="));
 		} else if (str_begins_with (arg, "ngsharedvt-trampolines=")) {
 			opts->ngsharedvt_arg_trampolines = atoi (arg + strlen ("ngsharedvt-trampolines="));
-		} else if (str_begins_with (arg, "autoreg")) {
-			opts->autoreg = TRUE;
 		} else if (str_begins_with (arg, "tool-prefix=")) {
 			opts->tool_prefix = g_strdup (arg + strlen ("tool-prefix="));
 		} else if (str_begins_with (arg, "ld-flags=")) {
@@ -6640,7 +6640,11 @@ mono_aot_parse_options (const char *aot_options, MonoAotOptions *opts)
 		} else if (str_begins_with (arg, "gc-maps")) {
 			mini_gc_enable_gc_maps_for_aot ();
 		} else if (str_begins_with (arg, "dump")) {
-			opts->dump_json = TRUE;			
+			opts->dump_json = TRUE;
+		} else if (str_begins_with (arg, "llvmonly")) {
+			opts->mode = MONO_AOT_MODE_FULL;
+			opts->llvm = TRUE;
+			opts->llvm_only = TRUE;
 		} else if (str_begins_with (arg, "help") || str_begins_with (arg, "?")) {
 			printf ("Supported options for --aot:\n");
 			printf ("    outfile=\n");
@@ -6663,7 +6667,6 @@ mono_aot_parse_options (const char *aot_options, MonoAotOptions *opts)
 			printf ("    nrgctx-trampolines=\n");
 			printf ("    nimt-trampolines=\n");
 			printf ("    ngsharedvt-trampolines=\n");
-			printf ("    autoreg\n");
 			printf ("    tool-prefix=\n");
 			printf ("    readonly-value=\n");
 			printf ("    soft-debug\n");
@@ -6680,6 +6683,8 @@ mono_aot_parse_options (const char *aot_options, MonoAotOptions *opts)
 			fprintf (stderr, "AOT : Unknown argument '%s'.\n", arg);
 			exit (1);
 		}
+
+		g_free ((gpointer) arg);
 	}
 
 	if (opts->use_trampolines_page) {
@@ -6688,7 +6693,8 @@ mono_aot_parse_options (const char *aot_options, MonoAotOptions *opts)
 		opts->nimt_trampolines = 0;
 		opts->ngsharedvt_arg_trampolines = 0;
 	}
-	g_strfreev (args);
+
+	g_ptr_array_free (args, /*free_seg=*/TRUE);
 }
 
 static void
@@ -6781,7 +6787,6 @@ can_encode_patch (MonoAotCompile *acfg, MonoJumpInfo *patch_info)
 		return can_encode_method (acfg, method);
 	}
 	case MONO_PATCH_INFO_VTABLE:
-	case MONO_PATCH_INFO_CLASS_INIT:
 	case MONO_PATCH_INFO_CLASS:
 	case MONO_PATCH_INFO_IID:
 	case MONO_PATCH_INFO_ADJUSTED_IID:
@@ -6797,7 +6802,8 @@ can_encode_patch (MonoAotCompile *acfg, MonoJumpInfo *patch_info)
 		}
 		break;
 	}
-	case MONO_PATCH_INFO_RGCTX_FETCH: {
+	case MONO_PATCH_INFO_RGCTX_FETCH:
+	case MONO_PATCH_INFO_RGCTX_SLOT_INDEX: {
 		MonoJumpInfoRgctxEntry *entry = patch_info->data.rgctx_entry;
 
 		if (!can_encode_method (acfg, entry->method))
@@ -6877,6 +6883,8 @@ compile_method (MonoAotCompile *acfg, MonoMethod *method)
 		flags |= JIT_FLAG_FULL_AOT;
 	if (acfg->llvm)
 		flags |= JIT_FLAG_LLVM;
+	if (acfg->aot_opts.llvm_only)
+		flags |= JIT_FLAG_LLVM_ONLY | JIT_FLAG_EXPLICIT_NULL_CHECKS;
 	if (acfg->aot_opts.no_direct_calls)
 		flags |= JIT_FLAG_NO_DIRECT_ICALLS;
 	cfg = mini_method_compile (method, acfg->opts, mono_get_root_domain (), flags, 0, index);
@@ -6987,10 +6995,11 @@ compile_method (MonoAotCompile *acfg, MonoMethod *method)
 		for (patch_info = cfg->patch_info; patch_info; patch_info = patch_info->next) {
 			switch (patch_info->type) {
 			case MONO_PATCH_INFO_RGCTX_FETCH:
+			case MONO_PATCH_INFO_RGCTX_SLOT_INDEX:
 			case MONO_PATCH_INFO_METHOD: {
 				MonoMethod *m = NULL;
 
-				if (patch_info->type == MONO_PATCH_INFO_RGCTX_FETCH) {
+				if (patch_info->type == MONO_PATCH_INFO_RGCTX_FETCH || patch_info->type == MONO_PATCH_INFO_RGCTX_SLOT_INDEX) {
 					MonoJumpInfoRgctxEntry *e = patch_info->data.rgctx_entry;
 
 					if (e->info_type == MONO_RGCTX_INFO_GENERIC_METHOD_CODE)
@@ -7058,7 +7067,7 @@ compile_method (MonoAotCompile *acfg, MonoMethod *method)
 				cfg->has_got_slots = TRUE;
 			break;
 		default:
-			if (!is_plt_patch (patch_info))
+			if (!is_plt_patch (patch_info) || (cfg->compile_llvm && acfg->aot_opts.llvm_only))
 				cfg->has_got_slots = TRUE;
 			break;
 		}
@@ -7271,6 +7280,18 @@ mono_aot_get_got_offset (MonoJumpInfo *ji)
 	return get_got_offset (llvm_acfg, TRUE, ji);
 }
 
+/*
+ * mono_aot_is_shared_got_offset:
+ *
+ *   Return whenever OFFSET refers to a GOT slot which is preinitialized
+ * when the AOT image is loaded.
+ */
+gboolean
+mono_aot_is_shared_got_offset (int offset)
+{
+	return offset < llvm_acfg->nshared_got_entries;
+}
+
 char*
 mono_aot_get_method_name (MonoCompile *cfg)
 {
@@ -7294,6 +7315,26 @@ mono_aot_mark_unused_llvm_plt_entry (MonoJumpInfo *patch_info)
 
 	plt_entry = get_plt_entry (llvm_acfg, patch_info);
 	plt_entry->llvm_used = FALSE;
+}
+
+char*
+mono_aot_get_direct_call_symbol (MonoJumpInfoType type, gconstpointer data)
+{
+	const char *sym = NULL;
+
+	if (llvm_acfg->aot_opts.direct_icalls) {
+		if (type == MONO_PATCH_INFO_JIT_ICALL_ADDR) {
+			/* Call to a C function implementing a jit icall */
+			sym = mono_lookup_jit_icall_symbol (data);
+		} else if (type == MONO_PATCH_INFO_ICALL_ADDR) {
+			MonoMethod *method = (gpointer)data;
+			if (!(method->flags & METHOD_ATTRIBUTE_PINVOKE_IMPL))
+				sym = mono_lookup_icall_symbol (method);
+		}
+		if (sym)
+			return g_strdup (sym);
+	}
+	return NULL;
 }
 
 char*
@@ -7390,9 +7431,29 @@ emit_llvm_file (MonoAotCompile *acfg)
 {
 	char *command, *opts, *tempbc, *output_fname;
 
+	/* Emit the LLVM code into a .bc file */
+	if (acfg->aot_opts.llvm_only && acfg->aot_opts.asm_only) {
+		mono_llvm_emit_aot_module (acfg->aot_opts.llvm_outfile, g_path_get_basename (acfg->image->name));
+		return TRUE;
+	}
+
 	tempbc = g_strdup_printf ("%s.bc", acfg->tmpbasename);
 	mono_llvm_emit_aot_module (tempbc, g_path_get_basename (acfg->image->name));
 	g_free (tempbc);
+
+	if (acfg->aot_opts.llvm_only) {
+		/* Use the stock clang from xcode */
+		// FIXME: arch
+		// FIXME: -O2
+		// FIXME: llc/opt flags
+		command = g_strdup_printf ("clang -march=x86-64 -fpic -msse -msse2 -msse3 -msse4 -O0 -c -o \"%s\" \"%s.bc\"", acfg->llvm_ofile, acfg->tmpbasename);
+		//command = g_strdup_printf ("/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang  -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS8.3.sdk -Qunused-arguments -miphoneos-version-min=8.2 -arch arm64 -fpic -O0 -c -o \"%s\" \"%s.bc\"", acfg->llvm_ofile, acfg->tmpbasename);
+
+		aot_printf (acfg, "Executing clang: %s\n", command);
+		if (execute_system (command) != 0)
+			return FALSE;
+		return TRUE;
+	}
 
 	/*
 	 * FIXME: Experiment with adding optimizations, the -std-compile-opts set takes
@@ -7409,7 +7470,6 @@ emit_llvm_file (MonoAotCompile *acfg)
 	 * then removing tailcallelim + the global opts.
 	 * strip-dead-prototypes deletes unused intrinsics definitions.
 	 */
-	opts = g_strdup ("-instcombine -simplifycfg");
 	//opts = g_strdup ("-simplifycfg -domtree -domfrontier -scalarrepl -instcombine -simplifycfg -domtree -domfrontier -scalarrepl -simplify-libcalls -instcombine -simplifycfg -instcombine -simplifycfg -reassociate -domtree -loops -loop-simplify -domfrontier -loop-simplify -lcssa -loop-rotate -licm -lcssa -loop-unswitch -instcombine -scalar-evolution -loop-simplify -lcssa -iv-users -indvars -loop-deletion -loop-simplify -lcssa -loop-unroll -instcombine -memdep -gvn -memdep -memcpyopt -sccp -instcombine -domtree -memdep -dse -adce -simplifycfg -domtree -verify");
 	/* The dse pass is disabled because of #13734 and #17616 */
 	/*
@@ -7423,6 +7483,7 @@ emit_llvm_file (MonoAotCompile *acfg)
 	 * Here, if 'Earlier' refers to a memset, and Later has no size info, it mistakenly thinks the memset is redundant.
 	 */
 	opts = g_strdup ("-targetlibinfo -no-aa -basicaa -notti -instcombine -simplifycfg -inline-cost -inline -sroa -domtree -early-cse -lazy-value-info -correlated-propagation -simplifycfg -instcombine -simplifycfg -reassociate -domtree -loops -loop-simplify -lcssa -loop-rotate -licm -lcssa -loop-unswitch -instcombine -scalar-evolution -loop-simplify -lcssa -indvars -loop-idiom -loop-deletion -loop-unroll -memdep -gvn -memdep -memcpyopt -sccp -instcombine -lazy-value-info -correlated-propagation -domtree -memdep -adce -simplifycfg -instcombine -strip-dead-prototypes -domtree -verify");
+	opts = g_strdup ("");
 #if 1
 	command = g_strdup_printf ("\"%sopt\" -f %s -o \"%s.opt.bc\" \"%s.bc\"", acfg->aot_opts.llvm_path, opts, acfg->tmpbasename, acfg->tmpbasename);
 	aot_printf (acfg, "Executing opt: %s\n", command);
@@ -7437,10 +7498,10 @@ emit_llvm_file (MonoAotCompile *acfg)
 	/* Verbose asm slows down llc greatly */
 	g_string_append (acfg->llc_args, " -asm-verbose=false");
 
-	g_string_append (acfg->llc_args, " -disable-gnu-eh-frame -enable-mono-eh-frame");
-
 	if (acfg->aot_opts.mtriple)
 		g_string_append_printf (acfg->llc_args, " -mtriple=%s", acfg->aot_opts.mtriple);
+
+	g_string_append (acfg->llc_args, " -disable-gnu-eh-frame -enable-mono-eh-frame");
 
 	g_string_append_printf (acfg->llc_args, " -mono-eh-frame-symbol=%s%s", acfg->user_symbol_prefix, acfg->llvm_eh_frame_symbol);
 
@@ -7476,7 +7537,11 @@ static void
 emit_code (MonoAotCompile *acfg)
 {
 	int oindex, i, prev_index;
+	gboolean saved_unbox_info = FALSE;
 	char symbol [256];
+
+	if (acfg->aot_opts.llvm_only)
+		return;
 
 #if defined(TARGET_POWERPC64)
 	sprintf (symbol, ".Lgot_addr");
@@ -7524,7 +7589,7 @@ emit_code (MonoAotCompile *acfg)
 		method = cfg->orig_method;
 
 		/* Emit unbox trampoline */
-		if (mono_aot_mode_is_full (&acfg->aot_opts) && cfg->orig_method->klass->valuetype) {
+		if (mono_aot_mode_is_full (&acfg->aot_opts) && cfg->orig_method->klass->valuetype && !(acfg->aot_opts.llvm_only && cfg->compile_llvm)) {
 			sprintf (symbol, "ut_%d", get_method_index (acfg, method));
 
 			emit_section_change (acfg, ".text", 0);
@@ -7543,6 +7608,23 @@ emit_code (MonoAotCompile *acfg)
 
 			if (acfg->thumb_mixed && cfg->compile_llvm)
 				emit_set_arm_mode (acfg);
+
+			if (!saved_unbox_info) {
+				char user_symbol [128];
+				GSList *unwind_ops;
+				sprintf (user_symbol, "%sunbox_trampoline_p", acfg->user_symbol_prefix);
+
+				emit_label (acfg, "ut_end");
+
+				unwind_ops = mono_unwind_get_cie_program ();
+				save_unwind_info (acfg, user_symbol, unwind_ops);
+				mono_free_unwind_info (unwind_ops);
+
+				/* Save the unbox trampoline size */
+				emit_symbol_diff (acfg, "ut_end", symbol, 0);
+
+				saved_unbox_info = TRUE;
+			}
 		}
 
 		if (cfg->compile_llvm)
@@ -7590,10 +7672,15 @@ emit_code (MonoAotCompile *acfg)
 #ifdef MONO_ARCH_AOT_SUPPORTED
 		int call_size;
 
-		if (acfg->cfgs [i])
-			arch_emit_direct_call (acfg, acfg->cfgs [i]->asm_symbol, FALSE, acfg->thumb_mixed && acfg->cfgs [i]->compile_llvm, NULL, &call_size);
-		else
+		if (acfg->cfgs [i]) {
+			if (acfg->aot_opts.llvm_only && acfg->cfgs [i]->compile_llvm)
+				/* Obtained by calling a generated function in the LLVM image */
+				arch_emit_direct_call (acfg, "method_addresses", FALSE, FALSE, NULL, &call_size);
+			else
+				arch_emit_direct_call (acfg, acfg->cfgs [i]->asm_symbol, FALSE, acfg->thumb_mixed && acfg->cfgs [i]->compile_llvm, NULL, &call_size);
+		} else {
 			arch_emit_direct_call (acfg, "method_addresses", FALSE, FALSE, NULL, &call_size);
+		}
 #endif
 	}
 
@@ -7619,7 +7706,7 @@ emit_code (MonoAotCompile *acfg)
 
 		method = cfg->orig_method;
 
-		if (mono_aot_mode_is_full (&acfg->aot_opts) && cfg->orig_method->klass->valuetype) {
+		if (mono_aot_mode_is_full (&acfg->aot_opts) && cfg->orig_method->klass->valuetype && !(acfg->aot_opts.llvm_only && cfg->compile_llvm)) {
 			index = get_method_index (acfg, method);
 
 			emit_int32 (acfg, index);
@@ -7649,7 +7736,7 @@ emit_code (MonoAotCompile *acfg)
 
 		method = cfg->orig_method;
 
-		if (mono_aot_mode_is_full (&acfg->aot_opts) && cfg->orig_method->klass->valuetype) {
+		if (mono_aot_mode_is_full (&acfg->aot_opts) && cfg->orig_method->klass->valuetype && !(acfg->aot_opts.llvm_only && cfg->compile_llvm)) {
 #ifdef MONO_ARCH_AOT_SUPPORTED
 			int call_size;
 
@@ -8087,6 +8174,11 @@ emit_unwind_info (MonoAotCompile *acfg)
 	int i;
 	char symbol [128];
 
+	if (acfg->aot_opts.llvm_only) {
+		g_assert (acfg->unwind_ops->len == 0);
+		return;
+	}
+
 	/* 
 	 * The unwind info contains a lot of duplicates so we emit each unique
 	 * entry once, and only store the offset from the start of the table in the
@@ -8349,6 +8441,9 @@ emit_got (MonoAotCompile *acfg)
 {
 	char symbol [256];
 
+	if (acfg->aot_opts.llvm_only)
+		return;
+
 	/* Don't make GOT global so accesses to it don't need relocations */
 	sprintf (symbol, "%s", acfg->got_symbol);
 
@@ -8489,28 +8584,12 @@ emit_globals (MonoAotCompile *acfg)
 }
 
 static void
-emit_autoreg (MonoAotCompile *acfg)
-{
-	char *symbol;
-
-	/*
-	 * Emit a function into the .ctor section which will be called by the ELF
-	 * loader to register this module with the runtime.
-	 */
-	if (! (!acfg->use_bin_writer && acfg->aot_opts.static_link && acfg->aot_opts.autoreg))
-		return;
-
-	symbol = g_strdup_printf ("_%s_autoreg", acfg->static_linking_symbol);
-
-	arch_emit_autoreg (acfg, symbol);
-
-	g_free (symbol);
-}	
-
-static void
 emit_mem_end (MonoAotCompile *acfg)
 {
 	char symbol [128];
+
+	if (acfg->aot_opts.llvm_only)
+		return;
 
 	sprintf (symbol, "mem_end");
 	emit_section_change (acfg, ".text", 1);
@@ -8540,27 +8619,11 @@ init_aot_file_info (MonoAotCompile *acfg, MonoAotFileInfo *info, int gc_name_off
 		info->trampoline_size [i] = acfg->trampoline_size [i];
 	info->num_rgctx_fetch_trampolines = acfg->aot_opts.nrgctx_fetch_trampolines;
 
-#if defined (TARGET_ARM) && defined (TARGET_MACH)
-	{
-		MonoType t;
-		int align = 0;
-
-		memset (&t, 0, sizeof (MonoType));
-		t.type = MONO_TYPE_R8;
-		mono_type_size (&t, &align);
-		info->double_align = align;
-
-		memset (&t, 0, sizeof (MonoType));
-		t.type = MONO_TYPE_I8;
-		mono_type_size (&t, &align);
-		info->long_align = align;
-	}
-#else
 	info->double_align = MONO_ABI_ALIGNOF (double);
 	info->long_align = MONO_ABI_ALIGNOF (gint64);
-#endif
 	info->generic_tramp_num = MONO_TRAMPOLINE_NUM;
 	info->tramp_page_size = acfg->tramp_page_size;
+	info->nshared_got_entries = acfg->nshared_got_entries;
 	for (i = 0; i < MONO_AOT_TRAMP_NUM; ++i)
 		info->tramp_page_code_offsets [i] = acfg->tramp_page_code_offsets [i];
 }
@@ -8582,9 +8645,19 @@ emit_aot_file_info (MonoAotCompile *acfg, MonoAotFileInfo *info)
 		symbols [sindex ++] = NULL;
 		symbols [sindex ++] = NULL;
 	}
-	symbols [sindex ++] = "jit_code_start";
-	symbols [sindex ++] = "jit_code_end";
-	symbols [sindex ++] = "method_addresses";
+	/* llvm_get_method */
+	symbols [sindex ++] = NULL;
+	/* llvm_get_unbox_tramp */
+	symbols [sindex ++] = NULL;
+	if (!acfg->aot_opts.llvm_only) {
+		symbols [sindex ++] = "jit_code_start";
+		symbols [sindex ++] = "jit_code_end";
+		symbols [sindex ++] = "method_addresses";
+	} else {
+		symbols [sindex ++] = NULL;
+		symbols [sindex ++] = NULL;
+		symbols [sindex ++] = NULL;
+	}
 	symbols [sindex ++] = "blob";
 	symbols [sindex ++] = "class_name_table";
 	symbols [sindex ++] = "class_info_offsets";
@@ -8621,9 +8694,16 @@ emit_aot_file_info (MonoAotCompile *acfg, MonoAotFileInfo *info)
 	symbols [sindex ++] = "plt";
 	symbols [sindex ++] = "plt_end";
 	symbols [sindex ++] = "unwind_info";
-	symbols [sindex ++] = "unbox_trampolines";
-	symbols [sindex ++] = "unbox_trampolines_end";
-	symbols [sindex ++] = "unbox_trampoline_addresses";
+	if (!acfg->aot_opts.llvm_only) {
+		symbols [sindex ++] = "unbox_trampolines";
+		symbols [sindex ++] = "unbox_trampolines_end";
+		symbols [sindex ++] = "unbox_trampoline_addresses";
+	} else {
+		symbols [sindex ++] = NULL;
+		symbols [sindex ++] = NULL;
+		symbols [sindex ++] = NULL;
+	}
+
 	g_assert (sindex == MONO_AOT_FILE_INFO_NUM_SYMBOLS);
 
 	sprintf (symbol, "%smono_aot_file_info", acfg->user_symbol_prefix);
@@ -8659,6 +8739,7 @@ emit_aot_file_info (MonoAotCompile *acfg, MonoAotFileInfo *info)
 	emit_int32 (acfg, info->long_align);
 	emit_int32 (acfg, info->generic_tramp_num);
 	emit_int32 (acfg, info->tramp_page_size);
+	emit_int32 (acfg, info->nshared_got_entries);
 
 	for (i = 0; i < MONO_AOT_TRAMP_NUM; ++i)
 		emit_int32 (acfg, info->num_trampolines [i]);
@@ -8846,7 +8927,7 @@ collect_methods (MonoAotCompile *acfg)
 		if (mono_aot_mode_is_full (&acfg->aot_opts) && method->iflags & METHOD_IMPL_ATTRIBUTE_INTERNAL_CALL) {
 			/* Compile the wrapper instead */
 			/* We do this here instead of add_wrappers () because it is easy to do it here */
-			MonoMethod *wrapper = mono_marshal_get_native_wrapper (method, check_for_pending_exc, TRUE);
+			MonoMethod *wrapper = mono_marshal_get_native_wrapper (method, TRUE, TRUE);
 			method = wrapper;
 		}
 
@@ -9070,7 +9151,7 @@ compile_asm (MonoAotCompile *acfg)
 	tmp_outfile_name = g_strdup_printf ("%s.tmp", outfile_name);
 
 	if (acfg->llvm) {
-		llvm_ofile = g_strdup (acfg->llvm_ofile);
+		llvm_ofile = g_strdup_printf ("\"%s\"", acfg->llvm_ofile);
 	} else {
 		llvm_ofile = g_strdup ("");
 	}
@@ -9078,8 +9159,11 @@ compile_asm (MonoAotCompile *acfg)
 	/* replace the ; flags separators with spaces */
 	g_strdelimit (ld_flags, ";", ' ');
 
+	if (acfg->aot_opts.llvm_only)
+		ld_flags = g_strdup_printf ("%s %s", ld_flags, "-lstdc++");
+
 #ifdef LD_NAME
-	command = g_strdup_printf ("%s -o %s %s %s.o %s", LD_NAME, tmp_outfile_name, llvm_ofile, acfg->tmpfname, ld_flags);
+	command = g_strdup_printf ("%s -o \"%s\" %s \"%s.o\" %s", LD_NAME, tmp_outfile_name, llvm_ofile, acfg->tmpfname, ld_flags);
 #else
 	command = g_strdup_printf ("\"%sld\" %s -shared -o %s %s %s.o %s", tool_prefix, LD_OPTIONS, tmp_outfile_name, llvm_ofile,
 		acfg->tmpfname, ld_flags);
@@ -9120,7 +9204,7 @@ compile_asm (MonoAotCompile *acfg)
 	rename (tmp_outfile_name, outfile_name);
 
 #if defined(TARGET_MACH)
-	command = g_strdup_printf ("dsymutil %s", outfile_name);
+	command = g_strdup_printf ("dsymutil \"%s\"", outfile_name);
 	aot_printf (acfg, "Executing dsymutil: %s\n", command);
 	if (execute_system (command) != 0) {
 		return 1;
@@ -9399,6 +9483,68 @@ static void aot_dump (MonoAotCompile *acfg)
 	mono_json_writer_destroy (&writer);
 }
 
+static const char *preinited_jit_icalls[] = {
+	"mono_aot_init_llvm_method",
+	"mono_aot_init_gshared_method_this",
+	"mono_aot_init_gshared_method_rgctx",
+	"mono_llvm_throw_corlib_exception",
+	"mono_resolve_vcall",
+	"mono_helper_ldstr_mscorlib"
+};
+
+static void
+add_preinit_got_slots (MonoAotCompile *acfg)
+{
+	MonoJumpInfo *ji;
+	int i;
+
+	/*
+	 * Allocate the first few GOT entries to information which is needed frequently, or it is needed
+	 * during method initialization etc.
+	 */
+
+	ji = mono_mempool_alloc0 (acfg->mempool, sizeof (MonoJumpInfo));
+	ji->type = MONO_PATCH_INFO_IMAGE;
+	ji->data.image = acfg->image;
+	get_got_offset (acfg, FALSE, ji);
+	get_got_offset (acfg, TRUE, ji);
+
+	ji = mono_mempool_alloc0 (acfg->mempool, sizeof (MonoJumpInfo));
+	ji->type = MONO_PATCH_INFO_MSCORLIB_GOT_ADDR;
+	get_got_offset (acfg, FALSE, ji);
+	get_got_offset (acfg, TRUE, ji);
+
+	ji = mono_mempool_alloc0 (acfg->mempool, sizeof (MonoJumpInfo));
+	ji->type = MONO_PATCH_INFO_GC_CARD_TABLE_ADDR;
+	get_got_offset (acfg, FALSE, ji);
+	get_got_offset (acfg, TRUE, ji);
+
+	ji = mono_mempool_alloc0 (acfg->mempool, sizeof (MonoJumpInfo));
+	ji->type = MONO_PATCH_INFO_GC_NURSERY_START;
+	get_got_offset (acfg, FALSE, ji);
+	get_got_offset (acfg, TRUE, ji);
+
+	ji = mono_mempool_alloc0 (acfg->mempool, sizeof (MonoJumpInfo));
+	ji->type = MONO_PATCH_INFO_JIT_TLS_ID;
+	get_got_offset (acfg, FALSE, ji);
+	get_got_offset (acfg, TRUE, ji);
+
+	ji = mono_mempool_alloc0 (acfg->mempool, sizeof (MonoJumpInfo));
+	ji->type = MONO_PATCH_INFO_AOT_MODULE;
+	get_got_offset (acfg, FALSE, ji);
+	get_got_offset (acfg, TRUE, ji);
+
+	for (i = 0; i < sizeof (preinited_jit_icalls) / sizeof (char*); ++i) {
+		ji = mono_mempool_alloc0 (acfg->mempool, sizeof (MonoAotCompile));
+		ji->type = MONO_PATCH_INFO_INTERNAL_METHOD;
+		ji->data.name = preinited_jit_icalls [i];
+		get_got_offset (acfg, FALSE, ji);
+		get_got_offset (acfg, TRUE, ji);
+	}
+
+	acfg->nshared_got_entries = acfg->got_offset;
+}
+
 int
 mono_compile_assembly (MonoAssembly *ass, guint32 opts, const char *aot_options)
 {
@@ -9431,9 +9577,6 @@ mono_compile_assembly (MonoAssembly *ass, guint32 opts, const char *aot_options)
 	if (acfg->aot_opts.logfile) {
 		acfg->logfile = fopen (acfg->aot_opts.logfile, "a+");
 	}
-
-	if (acfg->aot_opts.static_link)
-		acfg->aot_opts.autoreg = TRUE;
 
 	//acfg->aot_opts.print_skipped_methods = TRUE;
 
@@ -9508,6 +9651,9 @@ mono_compile_assembly (MonoAssembly *ass, guint32 opts, const char *aot_options)
 	if (mono_aot_mode_is_full (&acfg->aot_opts))
 		acfg->flags |= MONO_AOT_FILE_FLAG_FULL_AOT;
 
+	if (mono_threads_is_coop_enabled ())
+		acfg->flags |= MONO_AOT_FILE_FLAG_SAFEPOINTS;
+
 	if (acfg->aot_opts.instances_logfile_path) {
 		acfg->instances_logfile = fopen (acfg->aot_opts.instances_logfile_path, "w");
 		if (!acfg->instances_logfile) {
@@ -9534,6 +9680,8 @@ mono_compile_assembly (MonoAssembly *ass, guint32 opts, const char *aot_options)
 
 	if (acfg->llvm && acfg->thumb_mixed)
 		acfg->flags |= MONO_AOT_FILE_FLAG_LLVM_THUMB;
+	if (acfg->aot_opts.llvm_only)
+		acfg->flags |= MONO_AOT_FILE_FLAG_LLVM_ONLY;
 
 	acfg->assembly_name_sym = g_strdup (acfg->image->assembly->aname.name);
 	/* Get rid of characters which cannot occur in symbols */
@@ -9564,47 +9712,14 @@ mono_compile_assembly (MonoAssembly *ass, guint32 opts, const char *aot_options)
 
 	/* PLT offset 0 is reserved for the PLT trampoline */
 	acfg->plt_offset = 1;
+	add_preinit_got_slots (acfg);
 
 #ifdef ENABLE_LLVM
 	if (acfg->llvm) {
 		llvm_acfg = acfg;
-		mono_llvm_create_aot_module (acfg->image->assembly, acfg->global_prefix, TRUE, acfg->aot_opts.static_link);
+		mono_llvm_create_aot_module (acfg->image->assembly, acfg->global_prefix, TRUE, acfg->aot_opts.static_link, acfg->aot_opts.llvm_only);
 	}
 #endif
-
-	/* GOT offset 0 is reserved for the address of the current assembly */
-	{
-		MonoJumpInfo *ji;
-
-		ji = mono_mempool_alloc0 (acfg->mempool, sizeof (MonoJumpInfo));
-		ji->type = MONO_PATCH_INFO_IMAGE;
-		ji->data.image = acfg->image;
-
-		get_got_offset (acfg, FALSE, ji);
-		get_got_offset (acfg, TRUE, ji);
-
-		/* Slot 1 is reserved for the mscorlib got addr */
-		ji = mono_mempool_alloc0 (acfg->mempool, sizeof (MonoJumpInfo));
-		ji->type = MONO_PATCH_INFO_MSCORLIB_GOT_ADDR;
-		get_got_offset (acfg, FALSE, ji);
-		get_got_offset (acfg, TRUE, ji);
-
-		/* This is very common */
-		ji = mono_mempool_alloc0 (acfg->mempool, sizeof (MonoJumpInfo));
-		ji->type = MONO_PATCH_INFO_GC_CARD_TABLE_ADDR;
-		get_got_offset (acfg, FALSE, ji);
-		get_got_offset (acfg, TRUE, ji);
-
-		ji = mono_mempool_alloc0 (acfg->mempool, sizeof (MonoJumpInfo));
-		ji->type = MONO_PATCH_INFO_GC_NURSERY_START;
-		get_got_offset (acfg, FALSE, ji);
-		get_got_offset (acfg, TRUE, ji);
-
-		ji = mono_mempool_alloc0 (acfg->mempool, sizeof (MonoJumpInfo));
-		ji->type = MONO_PATCH_INFO_JIT_TLS_ID;
-		get_got_offset (acfg, FALSE, ji);
-		get_got_offset (acfg, TRUE, ji);
-	}
 
 	TV_GETTIME (atv);
 
@@ -9644,46 +9759,24 @@ mono_compile_assembly (MonoAssembly *ass, guint32 opts, const char *aot_options)
 	}
 #endif
 
-	if (!acfg->aot_opts.asm_only && !acfg->aot_opts.asm_writer && mono_bin_writer_supported ()) {
+	if (acfg->aot_opts.asm_only) {
 		if (acfg->aot_opts.outfile)
-			outfile_name = g_strdup_printf ("%s", acfg->aot_opts.outfile);
+			acfg->tmpfname = g_strdup_printf ("%s", acfg->aot_opts.outfile);
 		else
-			outfile_name = g_strdup_printf ("%s%s", acfg->image->name, MONO_SOLIB_EXT);
-
-		/* 
-		 * Can't use g_file_open_tmp () as it will be deleted at exit, and
-		 * it might be in another file system so the rename () won't work.
-		 */
-		tmp_outfile_name = g_strdup_printf ("%s.tmp", outfile_name);
-
-		acfg->fp = fopen (tmp_outfile_name, "w");
-		if (!acfg->fp) {
-			aot_printf (acfg, "Unable to create temporary file '%s': %s\n", tmp_outfile_name, strerror (errno));
-			return 1;
-		}
-
-		acfg->w = mono_img_writer_create (acfg->fp, TRUE);
-		acfg->use_bin_writer = TRUE;
+			acfg->tmpfname = g_strdup_printf ("%s.s", acfg->image->name);
+		acfg->fp = fopen (acfg->tmpfname, "w+");
 	} else {
-		if (acfg->aot_opts.asm_only) {
-			if (acfg->aot_opts.outfile)
-				acfg->tmpfname = g_strdup_printf ("%s", acfg->aot_opts.outfile);
-			else
-				acfg->tmpfname = g_strdup_printf ("%s.s", acfg->image->name);
-			acfg->fp = fopen (acfg->tmpfname, "w+");
-		} else {
-			int i = g_file_open_tmp ("mono_aot_XXXXXX", &acfg->tmpfname, NULL);
-			acfg->fp = fdopen (i, "w+");
-		}
-		if (acfg->fp == 0) {
-			aot_printerrf (acfg, "Unable to open file '%s': %s\n", acfg->tmpfname, strerror (errno));
-			return 1;
-		}
-		acfg->w = mono_img_writer_create (acfg->fp, FALSE);
-		
-		tmp_outfile_name = NULL;
-		outfile_name = NULL;
+		int i = g_file_open_tmp ("mono_aot_XXXXXX", &acfg->tmpfname, NULL);
+		acfg->fp = fdopen (i, "w+");
 	}
+	if (acfg->fp == 0) {
+		aot_printerrf (acfg, "Unable to open file '%s': %s\n", acfg->tmpfname, strerror (errno));
+		return 1;
+	}
+	acfg->w = mono_img_writer_create (acfg->fp, FALSE);
+
+	tmp_outfile_name = NULL;
+	outfile_name = NULL;
 
 	/* Compute symbols for methods */
 	for (i = 0; i < acfg->nmethods; ++i) {
@@ -9757,8 +9850,6 @@ mono_compile_assembly (MonoAssembly *ass, guint32 opts, const char *aot_options)
 
 	emit_globals (acfg);
 
-	emit_autoreg (acfg);
-
 	if (acfg->dwarf) {
 		emit_dwarf_info (acfg);
 		mono_dwarf_writer_close (acfg->dwarf);
@@ -9769,8 +9860,7 @@ mono_compile_assembly (MonoAssembly *ass, guint32 opts, const char *aot_options)
 	if (acfg->need_pt_gnu_stack) {
 		/* This is required so the .so doesn't have an executable stack */
 		/* The bin writer already emits this */
-		if (!acfg->use_bin_writer)
-			fprintf (acfg->fp, "\n.section	.note.GNU-stack,\"\",@progbits\n");
+		fprintf (acfg->fp, "\n.section	.note.GNU-stack,\"\",@progbits\n");
 	}
 
 #ifdef ENABLE_LLVM
@@ -9824,19 +9914,10 @@ mono_compile_assembly (MonoAssembly *ass, guint32 opts, const char *aot_options)
 		acfg_free (acfg);
 		return res;
 	}
-	if (acfg->use_bin_writer) {
-		int err = rename (tmp_outfile_name, outfile_name);
-
-		if (err) {
-			aot_printf (acfg, "Unable to rename '%s' to '%s': %s\n", tmp_outfile_name, outfile_name, strerror (errno));
-			return 1;
-		}
-	} else {
-		res = compile_asm (acfg);
-		if (res != 0) {
-			acfg_free (acfg);
-			return res;
-		}
+	res = compile_asm (acfg);
+	if (res != 0) {
+		acfg_free (acfg);
+		return res;
 	}
 	TV_GETTIME (btv);
 	acfg->stats.link_time = TV_ELAPSED (atv, btv);
@@ -9874,6 +9955,12 @@ int
 mono_compile_assembly (MonoAssembly *ass, guint32 opts, const char *aot_options)
 {
 	return 0;
+}
+
+gboolean
+mono_aot_is_shared_got_offset (int offset)
+{
+	return FALSE;
 }
 
 #endif

@@ -5,7 +5,7 @@
 #define LOG_HEADER_ID 0x4D505A01
 #define LOG_VERSION_MAJOR 0
 #define LOG_VERSION_MINOR 4
-#define LOG_DATA_VERSION 10
+#define LOG_DATA_VERSION 11
 /*
  * Changes in data versions:
  * version 2: added offsets in heap walk
@@ -16,6 +16,16 @@
  * version 8: added TYPE_RUNTIME and JIT helpers/trampolines
  * version 9: added MONO_PROFILER_CODE_BUFFER_EXCEPTION_HANDLING
  * version 10: added TYPE_COVERAGE
+ * version 11: added thread ID to TYPE_SAMPLE_HIT
+               added more load/unload events
+                   unload for class
+                   unload for image
+                   load/unload for appdomain
+                   load/unload for contexts
+                   load/unload/name for assemblies
+               removed TYPE_LOAD_ERR flag (profiler never generated it, now removed from the format itself)
+               added TYPE_GC_HANDLE_{CREATED,DESTROYED}_BT
+               TYPE_JIT events are no longer guaranteed to have code start/size info (can be zero)
  */
 
 enum {
@@ -35,22 +45,23 @@ enum {
 	TYPE_HEAP_OBJECT = 2 << 4,
 	TYPE_HEAP_ROOT   = 3 << 4,
 	/* extended type for TYPE_METADATA */
-	TYPE_START_LOAD   = 1 << 4,
 	TYPE_END_LOAD     = 2 << 4,
-	TYPE_START_UNLOAD = 3 << 4,
 	TYPE_END_UNLOAD   = 4 << 4,
-	TYPE_LOAD_ERR     = 1 << 7,
+	/* metadata type byte for TYPE_METADATA */
 	TYPE_CLASS     = 1,
 	TYPE_IMAGE     = 2,
 	TYPE_ASSEMBLY  = 3,
 	TYPE_DOMAIN    = 4,
 	TYPE_THREAD    = 5,
+	TYPE_CONTEXT   = 6,
 	/* extended type for TYPE_GC */
 	TYPE_GC_EVENT  = 1 << 4,
 	TYPE_GC_RESIZE = 2 << 4,
 	TYPE_GC_MOVE   = 3 << 4,
-	TYPE_GC_HANDLE_CREATED   = 4 << 4,
-	TYPE_GC_HANDLE_DESTROYED = 5 << 4,
+	TYPE_GC_HANDLE_CREATED      = 4 << 4,
+	TYPE_GC_HANDLE_DESTROYED    = 5 << 4,
+	TYPE_GC_HANDLE_CREATED_BT   = 6 << 4,
+	TYPE_GC_HANDLE_DESTROYED_BT = 7 << 4,
 	/* extended type for TYPE_METHOD */
 	TYPE_LEAVE     = 1 << 4,
 	TYPE_ENTER     = 2 << 4,
@@ -61,9 +72,11 @@ enum {
 	TYPE_CLAUSE       = 1 << 4,
 	TYPE_EXCEPTION_BT = 1 << 7,
 	/* extended type for TYPE_ALLOC */
-	TYPE_ALLOC_BT  = 1 << 4,
+	TYPE_ALLOC_NO_BT  = 0 << 4,
+	TYPE_ALLOC_BT     = 1 << 4,
 	/* extended type for TYPE_MONITOR */
-	TYPE_MONITOR_BT  = 1 << 7,
+	TYPE_MONITOR_NO_BT  = 0 << 7,
+	TYPE_MONITOR_BT     = 1 << 7,
 	/* extended type for TYPE_SAMPLE */
 	TYPE_SAMPLE_HIT           = 0 << 4,
 	TYPE_SAMPLE_USYM          = 1 << 4,

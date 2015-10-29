@@ -357,7 +357,7 @@ static void indent (int diff) {
 		indent_level += diff;
 	if (start_time == 0)
 		start_time = mono_100ns_ticks ();
-	printf ("[%p: %.5f %d] ", (void*)GetCurrentThreadId (), seconds_since_start (), indent_level);
+	printf ("[%p: %.5f %d] ", (void*)mono_native_thread_id_get (), seconds_since_start (), indent_level);
 	if (diff > 0)
 		indent_level += diff;
 }
@@ -403,7 +403,7 @@ void
 mono_trace_enter_method (MonoMethod *method, char *ebp)
 {
 	int i, j;
-	MonoClass *class;
+	MonoClass *klass;
 	MonoObject *o;
 	MonoJitArgumentInfo *arg_info;
 	MonoMethodSignature *sig;
@@ -440,7 +440,7 @@ mono_trace_enter_method (MonoMethod *method, char *ebp)
 		}
 	}
 
-	mono_arch_get_argument_info (gsctx, sig, sig->param_count, arg_info);
+	mono_arch_get_argument_info (sig, sig->param_count, arg_info);
 
 	if (MONO_TYPE_ISSTRUCT (mono_method_signature (method)->ret)) {
 		g_assert (!mono_method_signature (method)->ret->byref);
@@ -456,16 +456,16 @@ mono_trace_enter_method (MonoMethod *method, char *ebp)
 			o = *arg_in_stack_slot(this, MonoObject *);
 
 			if (o) {
-				class = o->vtable->klass;
+				klass = o->vtable->klass;
 
-				if (class == mono_defaults.string_class) {
+				if (klass == mono_defaults.string_class) {
 					MonoString *s = (MonoString*)o;
 					char *as = string_to_utf8 (s);
 
 					printf ("this:[STRING:%p:%s], ", o, as);
 					g_free (as);
 				} else {
-					printf ("this:%p[%s.%s %s], ", o, class->name_space, class->name, o->vtable->domain->friendly_name);
+					printf ("this:%p[%s.%s %s], ", o, klass->name_space, klass->name, o->vtable->domain->friendly_name);
 				}
 			} else 
 				printf ("this:NULL, ");
@@ -518,19 +518,19 @@ mono_trace_enter_method (MonoMethod *method, char *ebp)
 		case MONO_TYPE_OBJECT: {
 			o = *arg_in_stack_slot(cpos, MonoObject *);
 			if (o) {
-				class = o->vtable->klass;
+				klass = o->vtable->klass;
 		    
-				if (class == mono_defaults.string_class) {
+				if (klass == mono_defaults.string_class) {
 					char *as = string_to_utf8 ((MonoString*)o);
 
 					printf ("[STRING:%p:%s], ", o, as);
 					g_free (as);
-				} else if (class == mono_defaults.int32_class) {
+				} else if (klass == mono_defaults.int32_class) {
 					printf ("[INT32:%p:%d], ", o, *(gint32 *)((char *)o + sizeof (MonoObject)));
-				} else if (class == mono_defaults.monotype_class) {
+				} else if (klass == mono_defaults.monotype_class) {
 					printf ("[TYPE:%s], ", mono_type_full_name (((MonoReflectionType*)o)->type));
 				} else
-					printf ("[%s.%s:%p], ", class->name_space, class->name, o);
+					printf ("[%s.%s:%p], ", klass->name_space, klass->name, o);
 			} else {
 				printf ("%p, ", *arg_in_stack_slot(cpos, gpointer));
 			}
